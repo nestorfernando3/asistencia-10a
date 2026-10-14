@@ -9,12 +9,16 @@ import {
   claveDelDia,
   claveRegistro,
   contadoresDelDia,
+  csvLista,
   csvMatriz,
   csvResumen,
   diasEnMes,
   esFinDeSemana,
+  estadisticasDelMes,
+  estadisticasPorDia,
   estadoDe,
   fechaHumana,
+  hojasXlsxDelMes,
   letraEstado,
   matrizDelMes,
   mesAnterior,
@@ -161,4 +165,67 @@ test("csvMatriz: días en el encabezado y letras por estudiante", () => {
   assert.ok(csv.includes("Mat. No.;No.;Estudiante;1;2;5;6;7;8"));
   assert.ok(csv.includes("UNO UNO;A;A;A;P;P;P"));
   assert.ok(csv.includes('"DOS; DOS";P;P;P;T;E;A'));
+});
+
+test("csvLista: lista completa con estados", () => {
+  const csv = csvLista(estudiantes, { curso: "10°-A" });
+  const lineas = csv.split("\r\n");
+  assert.equal(lineas[0], "Curso;10°-A");
+  assert.equal(lineas[1], "Estudiantes;3");
+  assert.equal(lineas[3], "Mat. No.;No.;Estudiante;Estado;Nota persistente");
+  assert.ok(lineas.some((linea) => linea.includes("UNO UNO;Activa")));
+  assert.ok(lineas.some((linea) => linea.includes("TRES TRES;Retirada")));
+});
+
+test("estadísticas del mes", () => {
+  const resumen = resumenDelMes({ estudiantes, dias, registros, ajustes: AJUSTES_POR_DEFECTO });
+  const estadisticas = estadisticasDelMes({ estudiantes, resumen });
+  assert.equal(estadisticas.activos, 2);
+  assert.equal(estadisticas.retirados, 1);
+  assert.equal(estadisticas.dias, 6);
+  assert.equal(estadisticas.asistencias, 7);
+  assert.equal(estadisticas.porcentajeCurso, 58);
+  assert.equal(estadisticas.conAlerta, 1);
+  assert.equal(estadisticas.sinFaltas, 0);
+  assert.equal(estadisticas.promedioFaltas, 2);
+});
+
+test("estadísticas por día", () => {
+  const resumen = resumenDelMes({ estudiantes, dias, registros, ajustes: AJUSTES_POR_DEFECTO });
+  const porDia = estadisticasPorDia({ estudiantes, diasDeClase: resumen.diasDeClase, registros });
+  assert.equal(porDia.length, 6);
+  assert.deepEqual(
+    {
+      fecha: porDia[0].fecha,
+      presente: porDia[0].presente,
+      ausente: porDia[0].ausente,
+      porcentaje: porDia[0].porcentaje,
+    },
+    { fecha: "2026-10-01", presente: 1, ausente: 1, porcentaje: 50 }
+  );
+  assert.equal(porDia[5].fecha, "2026-10-08");
+  assert.equal(porDia[5].presente, 1);
+  assert.equal(porDia[5].ausente, 1);
+});
+
+test("hojas del Excel del mes", () => {
+  const resumen = resumenDelMes({ estudiantes, dias, registros, ajustes: AJUSTES_POR_DEFECTO });
+  const matriz = matrizDelMes({ estudiantes, diasDeClase: resumen.diasDeClase, registros });
+  const porDia = estadisticasPorDia({ estudiantes, diasDeClase: resumen.diasDeClase, registros });
+  const estadisticas = estadisticasDelMes({ estudiantes, resumen });
+  const hojas = hojasXlsxDelMes({ curso: "10°-A", mes: "2026-10", estudiantes, resumen, matriz, porDia, estadisticas });
+  assert.deepEqual(
+    hojas.map((hoja) => hoja.nombre),
+    ["Lista", "Resumen del mes", "Detalle por día", "Días del mes", "Estadísticas"]
+  );
+  assert.deepEqual(hojas[0].filas[0], ["Mat. No.", "No.", "Estudiante", "Estado", "Nota persistente"]);
+  assert.equal(hojas[0].filas.length, 4);
+  assert.deepEqual(hojas[1].filas[3].slice(0, 4), ["Mat. No.", "No.", "Estudiante", "Días de clase"]);
+  assert.ok(hojas[1].filas.some((fila) => fila[2] === "TOTAL DEL CURSO"));
+  assert.equal(hojas[1].filaNegrita, 4);
+  assert.deepEqual(hojas[2].filas[1].slice(3), ["A", "A", "A", "P", "P", "P"]);
+  assert.equal(hojas[3].filas[0][0], "Día");
+  assert.equal(hojas[3].filas.length, 7);
+  assert.equal(hojas[4].filas[2][0], "Días de clase");
+  assert.equal(hojas[4].filas[2][1], 6);
 });

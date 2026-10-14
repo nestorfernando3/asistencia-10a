@@ -1,5 +1,6 @@
 import { crearRepositorio, hayConfiguracion } from "./src/datos.js";
 import * as D from "./src/dominio.js";
+import { crearXlsx } from "./src/xlsx.js";
 
 const app = document.getElementById("app");
 const buscador = new URLSearchParams(location.search);
@@ -500,8 +501,9 @@ function vistaResumen(mes) {
         </table>
         <p class="leyenda">${plural(resumen.totales.diasDeClase, "día de clase", "días de clase")} en el mes · % = (P + T) ÷ días de clase · Alerta: 3+ faltas seguidas o 5+ en el mes.</p>
         <div class="grupo-botones no-imprimir">
-          <button class="boton-secundario" data-accion="csv-resumen">Exportar resumen (CSV)</button>
-          <button class="boton-secundario" data-accion="csv-matriz">Exportar detalle por día (CSV)</button>
+          <button class="boton-principal" data-accion="excel-mes">Descargar Excel del mes (lista, resumen, detalle y estadísticas)</button>
+          <button class="boton-secundario" data-accion="csv-resumen">Resumen (CSV)</button>
+          <button class="boton-secundario" data-accion="csv-matriz">Detalle por día (CSV)</button>
           <button class="boton-secundario" data-accion="imprimir">Imprimir</button>
         </div>
       </section>
@@ -581,12 +583,13 @@ function vistaLista() {
         <h2>Datos</h2>
         <div class="grupo-botones">
           <button class="boton-secundario" data-accion="importar-lista">Importar lista base (JSON)</button>
+          <button class="boton-secundario" data-accion="csv-lista">Exportar lista (CSV)</button>
           <button class="boton-secundario" data-accion="respaldo">Descargar respaldo (JSON)</button>
           <button class="boton-secundario" data-accion="restaurar-respaldo">Restaurar respaldo (JSON)</button>
         </div>
         <input type="file" accept=".json,application/json" hidden data-rol="archivo-lista">
         <input type="file" accept=".json,application/json" hidden data-rol="archivo-respaldo">
-        <p class="leyenda">La lista base se importa una sola vez (agrega o actualiza por Mat. No.). El respaldo guarda todo el histórico.</p>
+        <p class="leyenda">«Exportar lista» descarga el listado de estudiantes. El respaldo guarda todo el histórico; restaurarlo lo vuelve a subir.</p>
       </section>
 
       <section class="bloque">
@@ -893,6 +896,28 @@ async function exportarMatrizCsv() {
   );
 }
 
+function exportarListaCsv() {
+  const lista = [...estado.estudiantes].sort((a, b) => Number(a.no || 0) - Number(b.no || 0));
+  descargar("Asistencia_10A_lista.csv", "\uFEFF" + D.csvLista(lista, { curso: "10°-A" }), "text/csv;charset=utf-8");
+  avisar("Lista exportada.");
+}
+
+function exportarExcelDelMes() {
+  const mes = estado.mesVista;
+  const cache = estado.cache.get(mes);
+  const registros = [...cache.registros.values()];
+  const dias = [...cache.dias.values()];
+  const resumen = D.resumenDelMes({ estudiantes: estado.estudiantes, dias, registros, ajustes: estado.ajustes });
+  const matriz = D.matrizDelMes({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
+  const porDia = D.estadisticasPorDia({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
+  const estadisticas = D.estadisticasDelMes({ estudiantes: estado.estudiantes, resumen });
+  const hojas = D.hojasXlsxDelMes({ curso: "10°-A", mes, estudiantes: estado.estudiantes, resumen, matriz, porDia, estadisticas });
+  const archivo = crearXlsx(hojas);
+  const nombre = `Asistencia_10A_${D.mesHumano(mes).replace(" ", "_")}.xlsx`;
+  descargar(nombre, archivo, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  avisar("Excel del mes descargado.");
+}
+
 async function descargarRespaldo() {
   try {
     const datos = await repo.exportarTodo();
@@ -1074,6 +1099,12 @@ app.addEventListener("click", async (evento) => {
       break;
     case "csv-matriz":
       await exportarMatrizCsv();
+      break;
+    case "csv-lista":
+      exportarListaCsv();
+      break;
+    case "excel-mes":
+      exportarExcelDelMes();
       break;
     case "imprimir":
       window.print();

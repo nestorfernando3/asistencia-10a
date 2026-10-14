@@ -42,7 +42,8 @@ App web para el pase de lista diario del curso 10°-A (29 estudiantes) desde el 
 
 - Resumen mensual por estudiante (asistencias, faltas, tardes, excusas, %) y totales del curso.
 - Alertas resaltadas: 3 o más faltas consecutivas, o 5 o más acumuladas en el mes. Solo en pantalla y export; sin avisos externos.
-- Export del mes: CSV/Excel con resumen por estudiante (columna «Inas.» compatible con las planillas) + matriz día × estudiante.
+- **Excel del mes** (`.xlsx`): cinco hojas — Lista, Resumen del mes, Detalle por día, Días del mes (estadística diaria) y Estadísticas del curso.
+- Export del mes: CSV/Excel con resumen por estudiante (columna «Inas.» compatible con las planillas) + matriz día × estudiante + CSV de la lista.
 - Vista imprimible del mes (PDF vía impresión del navegador) y botón «Descargar respaldo» (histórico completo en JSON).
 
 ## Reglas de conteo

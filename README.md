@@ -11,7 +11,7 @@ Aplicación web para pasar lista a diario al curso 10°-A: calendario mensual, u
 2. Entra con el correo y la contraseña de la cuenta única.
 3. Toca el día en el calendario → todos aparecen **Presentes** → marca solo las excepciones (A/T/E) y, si hace falta, el comentario.
 4. Todo se guarda solo. «Todos presentes» registra el día completo. «Deshacer» revierte la última acción.
-5. En **Resumen** ves el mes por estudiante con las alertas (3+ faltas seguidas o 5+ en el mes) y exportas CSV o imprimes.
+5. En **Resumen** ves el mes por estudiante con las alertas (3+ faltas seguidas o 5+ en el mes) y descargas el **Excel del mes** (lista, resumen, detalle y estadísticas) o los CSV; también puedes imprimir.
 
 ## Modo demo
 
@@ -38,6 +38,8 @@ Para importarlo: abre la app **desde el computador** donde está el archivo → 
 - Los datos viven en Firestore y solo son visibles con la sesión iniciada (regla `request.auth != null`).
 - El repositorio y la página **jamás** contienen nombres de estudiantes: solo el código.
 - **Descargar respaldo (JSON)** guarda todo el histórico; **Restaurar respaldo** lo vuelve a subir (también sirve para migrar de plataforma).
+- **Descargar Excel del mes** produce un `.xlsx` con cinco hojas: Lista, Resumen del mes, Detalle por día, Días del mes y Estadísticas.
+- **Exportar lista (CSV)** descarga el listado de estudiantes (Mat. No., No., nombre, estado) desde la pantalla Lista.
 - Los CSV usan separador `;` y vienen con codificación para Excel; la columna «Inas.» coincide con las planillas institucionales.
 
 ## Estructura
@@ -47,6 +49,7 @@ index.html              Interfaz (una sola página)
 app.js                  Router, vistas y acciones
 src/dominio.js          Lógica pura (conteos, alertas, CSV) — con pruebas
 src/datos.js            Repositorios: Firebase (real) y demo (local)
+src/xlsx.js             Generador de Excel (.xlsx) sin dependencias
 src/firebase-config.js  Configuración web de Firebase (claves públicas)
 src/estilos.css         Estilos
 firestore.rules         Reglas de seguridad de Firestore

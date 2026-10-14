@@ -255,3 +255,147 @@ export function csvMatriz(matriz, { curso, mes, diasDeClase }) {
   }
   return aCsv(filas);
 }
+
+export function csvLista(estudiantes, { curso }) {
+  const ordenados = [...(estudiantes || [])].sort((a, b) => Number(a.no || 0) - Number(b.no || 0));
+  const filas = [
+    ["Curso", curso],
+    ["Estudiantes", ordenados.length],
+    [],
+    ["Mat. No.", "No.", "Estudiante", "Estado", "Nota persistente"],
+  ];
+  for (const estudiante of ordenados) {
+    filas.push([
+      estudiante.mat,
+      estudiante.no,
+      estudiante.nombre,
+      estudiante.estado === "retirada" ? "Retirada" : "Activa",
+      estudiante.notaPersistente || "",
+    ]);
+  }
+  return aCsv(filas);
+}
+
+export function estadisticasDelMes({ estudiantes, resumen }) {
+  const activos = resumen.filas.length;
+  const retirados = (estudiantes || []).filter((estudiante) => estudiante.estado === "retirada").length;
+  const dias = resumen.totales.diasDeClase;
+  const asistencias = resumen.totales.presente + resumen.totales.tarde;
+  const porcentajeCurso = dias && activos ? Math.round((asistencias / (dias * activos)) * 100) : null;
+  const conAlerta = resumen.filas.filter((fila) => fila.alerta).length;
+  const sinFaltas = resumen.filas.filter((fila) => fila.ausente === 0).length;
+  const promedioFaltas = activos ? Math.round((resumen.totales.ausente / activos) * 10) / 10 : null;
+  return { activos, retirados, dias, asistencias, porcentajeCurso, conAlerta, sinFaltas, promedioFaltas, totales: resumen.totales };
+}
+
+export function estadisticasPorDia({ estudiantes, diasDeClase, registros }) {
+  const activos = (estudiantes || []).filter((estudiante) => estudiante.estado !== "retirada");
+  const porFecha = indexarRegistros(registros);
+  return (diasDeClase || []).map((fecha) => {
+    const mapa = porFecha.get(fecha);
+    let presente = 0;
+    let ausente = 0;
+    let tarde = 0;
+    let excusa = 0;
+    for (const estudiante of activos) {
+      const estado = estadoDe(mapa?.get(String(estudiante.mat)));
+      if (estado === AUSENTE) ausente++;
+      else if (estado === TARDE) tarde++;
+      else if (estado === EXCUSA) excusa++;
+      else presente++;
+    }
+    const total = activos.length;
+    return {
+      fecha,
+      presente,
+      ausente,
+      tarde,
+      excusa,
+      porcentaje: total ? Math.round(((presente + tarde) / total) * 100) : null,
+    };
+  });
+}
+
+export function hojasXlsxDelMes({ curso, mes, estudiantes, resumen, matriz, porDia, estadisticas }) {
+  const ordenados = [...(estudiantes || [])].sort((a, b) => Number(a.no || 0) - Number(b.no || 0));
+
+  const lista = [
+    ["Mat. No.", "No.", "Estudiante", "Estado", "Nota persistente"],
+    ...ordenados.map((estudiante) => [
+      estudiante.mat,
+      estudiante.no,
+      estudiante.nombre,
+      estudiante.estado === "retirada" ? "Retirada" : "Activa",
+      estudiante.notaPersistente || "",
+    ]),
+  ];
+
+  const resumenFilas = [
+    ["Curso", curso],
+    ["Mes", mesHumano(mes)],
+    [],
+    ["Mat. No.", "No.", "Estudiante", "Días de clase", "Presente", "Tarde", "Excusa", "Ausente (Inas.)", "% Asistencia", "Alerta"],
+    ...resumen.filas.map((fila) => [
+      fila.mat,
+      fila.no,
+      fila.nombre,
+      resumen.totales.diasDeClase,
+      fila.presente,
+      fila.tarde,
+      fila.excusa,
+      fila.ausente,
+      fila.porcentaje == null ? "" : fila.porcentaje,
+      textoAlerta(fila.alerta),
+    ]),
+    [
+      "", "", "TOTAL DEL CURSO",
+      resumen.totales.diasDeClase,
+      resumen.totales.presente,
+      resumen.totales.tarde,
+      resumen.totales.excusa,
+      resumen.totales.ausente,
+      "", "",
+    ],
+  ];
+
+  const detalle = [
+    ["Mat. No.", "No.", "Estudiante", ...resumen.diasDeClase.map((fecha) => Number(fecha.slice(8, 10)))],
+    ...matriz.map((fila) => [fila.mat, fila.no, fila.nombre, ...fila.porDia]),
+  ];
+
+  const dias = [
+    ["Día", "Presentes", "Tardes", "Excusas", "Ausentes", "% Asistencia"],
+    ...(porDia || []).map((dia) => [
+      Number(dia.fecha.slice(8, 10)),
+      dia.presente,
+      dia.tarde,
+      dia.excusa,
+      dia.ausente,
+      dia.porcentaje == null ? "" : dia.porcentaje,
+    ]),
+  ];
+
+  const estadisticasFilas = [
+    ["Curso", curso],
+    ["Mes", mesHumano(mes)],
+    ["Días de clase", estadisticas.dias],
+    ["Estudiantes activos", estadisticas.activos],
+    ["Estudiantes retirados", estadisticas.retirados],
+    ["Asistencia del curso (%)", estadisticas.porcentajeCurso == null ? "" : estadisticas.porcentajeCurso],
+    ["Total asistencias (Presente + Tarde)", estadisticas.asistencias],
+    ["Total faltas (Inas.)", estadisticas.totales.ausente],
+    ["Total tardes", estadisticas.totales.tarde],
+    ["Total excusas", estadisticas.totales.excusa],
+    ["Promedio de faltas por estudiante", estadisticas.promedioFaltas == null ? "" : estadisticas.promedioFaltas],
+    ["Estudiantes con alerta", estadisticas.conAlerta],
+    ["Estudiantes sin faltas", estadisticas.sinFaltas],
+  ];
+
+  return [
+    { nombre: "Lista", filas: lista, filaNegrita: 1 },
+    { nombre: "Resumen del mes", filas: resumenFilas, filaNegrita: 4 },
+    { nombre: "Detalle por día", filas: detalle, filaNegrita: 1 },
+    { nombre: "Días del mes", filas: dias, filaNegrita: 1 },
+    { nombre: "Estadísticas", filas: estadisticasFilas, filaNegrita: 1 },
+  ];
+}
