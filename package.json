@@ -1,0 +1,10 @@
+{
+  "name": "asistencia-10a",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pase de lista diario del curso 10°-A — IED Brisas del Río",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\""
+  }
+}
