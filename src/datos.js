@@ -35,7 +35,19 @@ function mensajeDeError(error) {
   if (codigo.includes("invalid-email")) return "El correo no tiene un formato válido.";
   if (codigo.includes("too-many-requests")) return "Demasiados intentos. Espera un momento e intenta de nuevo.";
   if (codigo.includes("network")) return "Sin conexión. Revisa el internet e intenta de nuevo.";
-  return "No se pudo entrar. Intenta de nuevo.";
+  if (codigo.includes("operation-not-allowed")) {
+    return "El acceso con correo y contraseña no está habilitado en Firebase.";
+  }
+  if (codigo.includes("user-disabled")) return "Esta cuenta está deshabilitada en Firebase Authentication.";
+  if (codigo.includes("invalid-api-key")) return "La configuración de Firebase tiene una API key no válida.";
+  if (codigo.includes("app-not-authorized")) return "Firebase no autoriza esta app para el dominio actual.";
+  if (codigo.includes("unauthorized-domain")) return "El dominio de esta app no está autorizado en Firebase Authentication.";
+  if (codigo.includes("requests-to-this-api")) {
+    return "La API de autenticación de Firebase está bloqueada para esta configuración.";
+  }
+  return codigo
+    ? `No se pudo entrar (Firebase: ${codigo}). Intenta de nuevo.`
+    : "No se pudo entrar. Intenta de nuevo.";
 }
 
 async function crearRepositorioFirebase(config) {
