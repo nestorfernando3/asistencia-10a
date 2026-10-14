@@ -901,3 +901,295 @@ textarea {
     box-shadow: none;
   }
 }
+
+/* ---------- Informe PDF (documento mensual) ---------- */
+
+.barra-pdf {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 14px 16px 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.barra-pdf .nota-pdf {
+  flex: 1;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--suave);
+}
+
+.documento {
+  max-width: 1100px;
+  width: calc(100% - 28px);
+  margin: 10px auto 48px;
+  background: var(--blanco);
+  border-radius: 4px;
+  box-shadow: 0 6px 30px rgba(18, 42, 66, 0.14);
+  padding: 16mm 13mm 12mm;
+  color: #14202e;
+  font-size: 10pt;
+  line-height: 1.35;
+  print-color-adjust: exact;
+  -webkit-print-color-adjust: exact;
+}
+
+.doc-membrete {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+}
+
+.doc-membrete-izq {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.doc-logo {
+  width: 19mm;
+  height: 19mm;
+  object-fit: contain;
+  flex: none;
+}
+
+.doc-escuela strong {
+  display: block;
+  font-size: 12.5pt;
+  letter-spacing: 0.015em;
+}
+
+.doc-escuela span {
+  display: block;
+  font-size: 8.5pt;
+  color: #5b6675;
+  margin-top: 2px;
+}
+
+.doc-titulo {
+  text-align: right;
+}
+
+.doc-titulo strong {
+  display: block;
+  font-size: 12.5pt;
+  color: var(--azul);
+}
+
+.doc-titulo span {
+  display: block;
+  font-size: 9pt;
+  color: #5b6675;
+  margin-top: 2px;
+}
+
+.doc-regla {
+  position: relative;
+  border-top: 3pt solid var(--azul);
+  margin: 10px 0 6px;
+}
+
+.doc-regla::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 32%;
+  border-top: 3pt solid var(--amarillo);
+}
+
+.doc-seccion {
+  margin-top: 14px;
+}
+
+.doc-seccion h3 {
+  margin: 0 0 7px;
+  font-size: 11.5pt;
+  color: var(--azul);
+}
+
+.doc-scroll {
+  overflow-x: auto;
+}
+
+.doc-tabla {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 9pt;
+}
+
+.doc-tabla th {
+  background: var(--azul);
+  color: var(--blanco);
+  font-size: 8.5pt;
+  font-weight: 700;
+  padding: 5px 4px;
+  text-align: center;
+}
+
+.doc-tabla td {
+  padding: 4px;
+  text-align: center;
+  border-bottom: 0.75pt solid #dbe2ea;
+}
+
+.doc-tabla th.izq,
+.doc-tabla td.izq {
+  text-align: left;
+}
+
+.doc-tabla tbody tr:nth-child(even) td {
+  background: #f7fafd;
+}
+
+.doc-tabla tbody tr.alerta td {
+  background: var(--rojo-claro);
+}
+
+.doc-tabla tfoot td {
+  font-weight: 700;
+  border-top: 1.5pt solid var(--azul);
+  background: var(--azul-claro);
+}
+
+.doc-alerta {
+  color: var(--rojo);
+  font-weight: 700;
+  font-size: 8pt;
+}
+
+.doc-nota {
+  font-size: 7.5pt;
+  color: #7a8696;
+  margin: 6px 0 0;
+}
+
+.doc-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 16px;
+}
+
+.doc-stat {
+  flex: 1 1 110px;
+  min-width: 96px;
+  border: 0.75pt solid #cfd9e6;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f7fafd;
+}
+
+.doc-stat strong {
+  display: block;
+  font-size: 15pt;
+  color: var(--azul);
+  line-height: 1.15;
+}
+
+.doc-stat span {
+  display: block;
+  font-size: 7pt;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #5b6675;
+  margin-top: 2px;
+}
+
+.doc-matriz {
+  font-size: 8pt;
+}
+
+.doc-matriz th,
+.doc-matriz td {
+  padding: 3px 2px;
+}
+
+.doc-letra-p {
+  color: var(--verde);
+  font-weight: 700;
+}
+
+.doc-letra-a {
+  color: var(--rojo);
+  font-weight: 700;
+}
+
+.doc-letra-t {
+  color: var(--ambar);
+  font-weight: 700;
+}
+
+.doc-letra-e {
+  color: var(--excusa);
+  font-weight: 700;
+}
+
+.doc-pie {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 7px;
+  border-top: 0.75pt solid #dbe2ea;
+  font-size: 7.5pt;
+  color: #7a8696;
+}
+
+.nueva-pagina {
+  break-before: page;
+  page-break-before: always;
+}
+
+@media screen {
+  .doc-tabla {
+    min-width: 660px;
+  }
+
+  .doc-matriz {
+    min-width: 720px;
+  }
+}
+
+@media (max-width: 640px) {
+  .documento {
+    padding: 16px 14px;
+  }
+
+  .barra-pdf .nota-pdf {
+    display: none;
+  }
+}
+
+@media print {
+  .barra-pdf {
+    display: none !important;
+  }
+
+  .documento {
+    max-width: none;
+    width: auto;
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    border-radius: 0;
+    font-size: 9.5pt;
+  }
+
+  .doc-scroll {
+    overflow: visible;
+  }
+
+  .doc-tabla,
+  .doc-matriz {
+    min-width: 0;
+  }
+
+  .doc-seccion {
+    margin-top: 10px;
+  }
+}

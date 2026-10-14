@@ -72,6 +72,11 @@ export function fechaHumana(clave) {
   return `${NOMBRES_DIA[fecha.getDay()]}, ${fecha.getDate()} de ${NOMBRES_MES[fecha.getMonth()]} de ${fecha.getFullYear()}`;
 }
 
+export function fechaCortaHumana(clave) {
+  const fecha = fechaDeClave(clave);
+  return `${fecha.getDate()} de ${NOMBRES_MES[fecha.getMonth()]} de ${fecha.getFullYear()}`;
+}
+
 export function mesHumano(claveMes) {
   const { anio, mes } = partesDeMes(claveMes);
   const nombre = NOMBRES_MES[mes - 1];

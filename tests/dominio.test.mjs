@@ -17,6 +17,7 @@ import {
   estadisticasDelMes,
   estadisticasPorDia,
   estadoDe,
+  fechaCortaHumana,
   fechaHumana,
   hojasXlsxDelMes,
   letraEstado,
@@ -77,6 +78,7 @@ test("findes de semana y clave del día", () => {
 
 test("fecha humana", () => {
   assert.equal(fechaHumana("2026-10-14"), "miércoles, 14 de octubre de 2026");
+  assert.equal(fechaCortaHumana("2026-10-14"), "14 de octubre de 2026");
 });
 
 test("estadoDe, letras y clave de registro", () => {

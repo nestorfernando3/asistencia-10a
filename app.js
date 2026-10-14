@@ -96,6 +96,19 @@ function parsearRuta() {
   return { vista, param: param || null };
 }
 
+function actualizarEstiloPaginaPdf(activo) {
+  if (activo) {
+    if (!document.getElementById("estilo-pdf")) {
+      const estilo = document.createElement("style");
+      estilo.id = "estilo-pdf";
+      estilo.textContent = "@page { size: A4 landscape; margin: 9mm; }";
+      document.head.appendChild(estilo);
+    }
+  } else {
+    document.getElementById("estilo-pdf")?.remove();
+  }
+}
+
 async function asegurarMes(claveMes) {
   if (estado.cache.has(claveMes)) return estado.cache.get(claveMes);
   const { dias, registros } = await repo.cargarMes(claveMes);
@@ -119,6 +132,8 @@ function prepararDia(cache, fecha) {
 
 async function render() {
   const token = ++tokenRender;
+  const ruta = parsearRuta();
+  actualizarEstiloPaginaPdf(ruta.vista === "pdf");
   if (estado.modo === "sin-config") {
     app.innerHTML = vistaSinConfig();
     return;
@@ -127,7 +142,6 @@ async function render() {
     app.innerHTML = vistaEntrar();
     return;
   }
-  const ruta = parsearRuta();
   try {
     if (ruta.vista === "dia" && ruta.param) {
       let fecha = ruta.param;
@@ -145,6 +159,12 @@ async function render() {
       app.innerHTML = vistaResumen(mes);
     } else if (ruta.vista === "lista") {
       app.innerHTML = vistaLista();
+    } else if (ruta.vista === "pdf") {
+      const mes = /^\d{4}-\d{2}$/.test(ruta.param || "") ? ruta.param : estado.mesVista;
+      await asegurarMes(mes);
+      if (token !== tokenRender) return;
+      estado.mesVista = mes;
+      app.innerHTML = vistaPdf(mes);
     } else {
       const mes = /^\d{4}-\d{2}$/.test(ruta.param || "") ? ruta.param : estado.mesVista;
       const cache = await asegurarMes(mes);
@@ -504,11 +524,145 @@ function vistaResumen(mes) {
           <button class="boton-principal" data-accion="excel-mes">Descargar Excel del mes (lista, resumen, detalle y estadísticas)</button>
           <button class="boton-secundario" data-accion="csv-resumen">Resumen (CSV)</button>
           <button class="boton-secundario" data-accion="csv-matriz">Detalle por día (CSV)</button>
-          <button class="boton-secundario" data-accion="imprimir">Imprimir</button>
+          <button class="boton-secundario" data-accion="informe-pdf">Informe PDF (horizontal)</button>
         </div>
       </section>
     </main>
     ${navInferior("resumen")}
+  `;
+}
+
+function tarjetaEstadistica(valor, etiqueta) {
+  return `<div class="doc-stat"><strong>${esc(String(valor))}</strong><span>${esc(etiqueta)}</span></div>`;
+}
+
+function vistaPdf(mes) {
+  const cache = estado.cache.get(mes);
+  const registros = [...cache.registros.values()];
+  const dias = [...cache.dias.values()];
+  const resumen = D.resumenDelMes({ estudiantes: estado.estudiantes, dias, registros, ajustes: estado.ajustes });
+  const matriz = D.matrizDelMes({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
+  const estadisticas = D.estadisticasDelMes({ estudiantes: estado.estudiantes, resumen });
+
+  const filas = resumen.filas.map((fila) => `
+    <tr class="${fila.alerta ? "alerta" : ""}">
+      <td>${fila.no}</td>
+      <td>${fila.mat}</td>
+      <td class="izq">${esc(fila.nombre)}</td>
+      <td>${resumen.totales.diasDeClase}</td>
+      <td>${fila.presente}</td>
+      <td>${fila.tarde}</td>
+      <td>${fila.excusa}</td>
+      <td><strong>${fila.ausente}</strong></td>
+      <td>${fila.porcentaje == null ? "—" : `${fila.porcentaje}%`}</td>
+      <td class="izq doc-alerta">${esc(D.textoAlerta(fila.alerta))}</td>
+    </tr>
+  `).join("");
+
+  const encabezadoDias = resumen.diasDeClase.map((fecha) => `<th>${Number(fecha.slice(8, 10))}</th>`).join("");
+  const filasMatriz = matriz.map((fila) => `
+    <tr>
+      <td>${fila.no}</td>
+      <td class="izq">${esc(fila.nombre)}</td>
+      ${fila.porDia.map((letra) => `<td class="doc-letra-${letra.toLowerCase()}">${letra}</td>`).join("")}
+    </tr>
+  `).join("");
+
+  return `
+    <div class="barra-pdf no-imprimir">
+      <button class="boton-secundario" data-accion="volver-pdf" data-mes="${mes}">‹ Volver al resumen</button>
+      <p class="nota-pdf">Se abrirá el diálogo de impresión: elige «Guardar como PDF». La hoja ya está configurada en horizontal (A4).</p>
+      <button class="boton-principal compacto" data-accion="imprimir-pdf">Guardar como PDF</button>
+    </div>
+    <div class="documento">
+      <header class="doc-membrete">
+        <div class="doc-membrete-izq">
+          <img class="doc-logo" src="assets/institution/logo_colegio.png" alt="">
+          <div class="doc-escuela">
+            <strong>INSTITUCIÓN EDUCATIVA DISTRITAL BRISAS DEL RÍO</strong>
+            <span>Resolución 5256 de 2017 · Barranquilla, Atlántico</span>
+          </div>
+        </div>
+        <div class="doc-titulo">
+          <strong>Informe mensual de asistencia</strong>
+          <span>Curso 10°-A · ${D.mesHumano(mes)}</span>
+          <span>Generado el ${D.fechaCortaHumana(D.hoyClave())}</span>
+        </div>
+      </header>
+      <div class="doc-regla"></div>
+
+      <section class="doc-seccion">
+        <h3>Resumen del mes por estudiante</h3>
+        <div class="doc-scroll">
+          <table class="doc-tabla">
+            <thead>
+              <tr>
+                <th>No.</th>
+                <th>Mat. No.</th>
+                <th class="izq">Estudiante</th>
+                <th>Días de clase</th>
+                <th title="Presente">P</th>
+                <th title="Tarde">T</th>
+                <th title="Excusa">E</th>
+                <th title="Ausente">A (Inas.)</th>
+                <th title="Porcentaje de asistencia">% Asist.</th>
+                <th class="izq">Alerta</th>
+              </tr>
+            </thead>
+            <tbody>${filas}</tbody>
+            <tfoot>
+              <tr>
+                <td></td>
+                <td></td>
+                <td class="izq">TOTAL DEL CURSO</td>
+                <td>${resumen.totales.diasDeClase}</td>
+                <td>${resumen.totales.presente}</td>
+                <td>${resumen.totales.tarde}</td>
+                <td>${resumen.totales.excusa}</td>
+                <td>${resumen.totales.ausente}</td>
+                <td>${estadisticas.porcentajeCurso == null ? "—" : `${estadisticas.porcentajeCurso}%`}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <p class="doc-nota">P presente · T tarde · E excusa justificada · A ausencia sin justificar (columna «Inas.» de las planillas) · % = (P + T) ÷ días de clase.</p>
+      </section>
+
+      <section class="doc-seccion nueva-pagina">
+        <h3>Estadísticas del curso</h3>
+        <div class="doc-stats">
+          ${tarjetaEstadistica(estadisticas.dias, "Días de clase")}
+          ${tarjetaEstadistica(estadisticas.porcentajeCurso == null ? "—" : `${estadisticas.porcentajeCurso}%`, "Asistencia del curso")}
+          ${tarjetaEstadistica(estadisticas.asistencias, "Asistencias (P + T)")}
+          ${tarjetaEstadistica(estadisticas.totales.ausente, "Faltas (Inas.)")}
+          ${tarjetaEstadistica(estadisticas.totales.tarde, "Tardes")}
+          ${tarjetaEstadistica(estadisticas.totales.excusa, "Excusas")}
+          ${tarjetaEstadistica(estadisticas.conAlerta, "Con alerta")}
+          ${tarjetaEstadistica(estadisticas.sinFaltas, "Sin faltas")}
+        </div>
+
+        <h3>Detalle por día</h3>
+        <div class="doc-scroll">
+          <table class="doc-tabla doc-matriz">
+            <thead>
+              <tr>
+                <th>No.</th>
+                <th class="izq">Estudiante</th>
+                ${encabezadoDias}
+              </tr>
+            </thead>
+            <tbody>${filasMatriz}</tbody>
+          </table>
+        </div>
+        <p class="doc-nota">Cada columna es un día de clase del mes (número del día). Las letras siguen la misma convención del resumen.</p>
+      </section>
+
+      <footer class="doc-pie">
+        <span>IED Brisas del Río · Asistencia 10°-A · documento de uso interno</span>
+        <span>${D.mesHumano(mes)}</span>
+      </footer>
+    </div>
   `;
 }
 
@@ -1106,7 +1260,13 @@ app.addEventListener("click", async (evento) => {
     case "excel-mes":
       exportarExcelDelMes();
       break;
-    case "imprimir":
+    case "informe-pdf":
+      location.hash = `#/pdf/${estado.mesVista}`;
+      break;
+    case "volver-pdf":
+      location.hash = `#/resumen/${elemento.dataset.mes}`;
+      break;
+    case "imprimir-pdf":
       window.print();
       break;
     case "respaldo":
