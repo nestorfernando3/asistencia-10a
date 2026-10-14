@@ -2,8 +2,8 @@ import pathlib
 
 from PIL import Image, ImageDraw, ImageFont
 
-FONDOS = (18, 63, 109, 255)
-BANDA = (46, 109, 180, 255)
+FONDOS = (30, 95, 168, 255)
+BANDA = (231, 230, 54, 255)
 BLANCO = (255, 255, 255, 255)
 FUENTES = [
     "/System/Library/Fonts/HelveticaNeue.ttc",

@@ -164,8 +164,11 @@ function cabecera() {
   return `
     <header class="cabecera no-imprimir">
       <div class="marca-app">
-        <span class="titulo">Asistencia 10°-A</span>
-        <span class="sub">IED Brisas del Río</span>
+        <img class="logo-app" src="assets/institution/logo_colegio.png" alt="Escudo de la IED Brisas del Río">
+        <div class="textos">
+          <span class="titulo">Asistencia 10°-A</span>
+          <span class="sub">IED Brisas del Río</span>
+        </div>
       </div>
     </header>
     ${demo}
@@ -191,6 +194,7 @@ function vistaSinConfig() {
   return `
     <main class="contenido">
       <section class="bloque tarjeta-config">
+        <img class="logo-config" src="assets/institution/logo_colegio.png" alt="">
         <h1>Asistencia 10°-A</h1>
         <p>Falta conectar la base de datos (Firebase). Sigue los pasos de <code>README.md</code> y pega la configuración en <code>src/firebase-config.js</code>.</p>
         <p>Mientras tanto puedes explorar la aplicación con datos de ejemplo:</p>
@@ -205,6 +209,7 @@ function vistaEntrar() {
     return `
       <main class="pantalla-entrar">
         <section class="tarjeta">
+          <img class="logo-tarjeta" src="assets/institution/logo_colegio.png" alt="">
           <h1>Asistencia 10°-A</h1>
           <p class="sub">IED Brisas del Río</p>
           <p class="demo-nota">Estás en modo demo: los datos quedan solo en este navegador.</p>
@@ -216,6 +221,7 @@ function vistaEntrar() {
   return `
     <main class="pantalla-entrar">
       <section class="tarjeta">
+        <img class="logo-tarjeta" src="assets/institution/logo_colegio.png" alt="">
         <h1>Asistencia 10°-A</h1>
         <p class="sub">IED Brisas del Río</p>
         <form data-accion="entrar">
@@ -272,7 +278,7 @@ function vistaMes(mes, cache) {
     if (fecha === hoy) clases.push("hoy");
     if (futuro) clases.push("futuro");
     celdas += `
-      <button class="${clases.join(" ")}" data-accion="abrir-dia" data-fecha="${fecha}" ${futuro ? "disabled" : ""} aria-label="${esc(D.fechaHumana(fecha))}">
+      <button class="${clases.join(" ")}" data-accion="abrir-dia" data-fecha="${fecha}" ${futuro ? "disabled" : ""} ${fecha === hoy ? 'aria-current="date"' : ""} aria-label="${esc(D.fechaHumana(fecha))}">
         <span class="numero">${dia}</span>
         <span class="marca ${marca}"></span>
       </button>
@@ -292,11 +298,16 @@ function vistaMes(mes, cache) {
           ${["L", "M", "X", "J", "V", "S", "D"].map((letra) => `<span class="dia-semana">${letra}</span>`).join("")}
           ${celdas}
         </div>
+        <p class="leyenda-calendario">
+          <span><span class="marca guardado"></span>Registrado</span>
+          <span><span class="marca pendiente"></span>Pendiente</span>
+          <span><span class="marca sin-clase"></span>Sin clase</span>
+        </p>
         <div class="resumen-mes">
           <span class="dato">${plural(resumen.totales.diasDeClase, "día de clase", "días de clase")}</span>
           <span class="dato rojo">${plural(resumen.totales.ausente, "falta en el mes", "faltas en el mes")}</span>
         </div>
-        <button class="boton-principal" data-accion="ir-hoy">Pasar lista de hoy</button>
+        <button class="boton-principal" data-accion="ir-hoy">${cache.dias.has(hoy) ? "Ver el pase de hoy" : "Pasar lista de hoy"}</button>
       </section>
     </main>
     ${navInferior("mes")}
@@ -1004,6 +1015,7 @@ app.addEventListener("click", async (evento) => {
     case "nota-dia":
       estado.notaAbierta = !estado.notaAbierta;
       render();
+      if (estado.notaAbierta) document.querySelector('[data-campo="nota-texto"]')?.focus();
       break;
     case "guardar-nota-dia":
       await guardarNotaDia(fecha);
@@ -1020,6 +1032,9 @@ app.addEventListener("click", async (evento) => {
         estado.notaAbierta = false;
       }
       render();
+      if (estado.comentarioAbierto === matNumero) {
+        document.querySelector(`textarea[data-comentario="${matNumero}"]`)?.focus();
+      }
       break;
     }
     case "etiqueta": {
