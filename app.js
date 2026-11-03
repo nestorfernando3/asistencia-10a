@@ -1,6 +1,7 @@
 import { crearRepositorio, hayConfiguracion } from "./src/datos.js";
 import * as D from "./src/dominio.js";
 import { crearXlsx } from "./src/xlsx.js";
+import { crearInformePdf, nombreInformePdf, prepararLibrerias } from "./src/pdf.js";
 
 const app = document.getElementById("app");
 const buscador = new URLSearchParams(location.search);
@@ -165,6 +166,7 @@ async function render() {
       if (token !== tokenRender) return;
       estado.mesVista = mes;
       app.innerHTML = vistaPdf(mes);
+      prepararLibrerias().catch(() => {});
     } else {
       const mes = /^\d{4}-\d{2}$/.test(ruta.param || "") ? ruta.param : estado.mesVista;
       const cache = await asegurarMes(mes);
@@ -536,13 +538,18 @@ function tarjetaEstadistica(valor, etiqueta) {
   return `<div class="doc-stat"><strong>${esc(String(valor))}</strong><span>${esc(etiqueta)}</span></div>`;
 }
 
-function vistaPdf(mes) {
+function datosInforme(mes) {
   const cache = estado.cache.get(mes);
   const registros = [...cache.registros.values()];
   const dias = [...cache.dias.values()];
   const resumen = D.resumenDelMes({ estudiantes: estado.estudiantes, dias, registros, ajustes: estado.ajustes });
   const matriz = D.matrizDelMes({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
   const estadisticas = D.estadisticasDelMes({ estudiantes: estado.estudiantes, resumen });
+  return { mes, resumen, matriz, estadisticas };
+}
+
+function vistaPdf(mes) {
+  const { resumen, matriz, estadisticas } = datosInforme(mes);
 
   const filas = resumen.filas.map((fila) => `
     <tr class="${fila.alerta ? "alerta" : ""}">
@@ -571,8 +578,11 @@ function vistaPdf(mes) {
   return `
     <div class="barra-pdf no-imprimir">
       <button class="boton-secundario" data-accion="volver-pdf" data-mes="${mes}">‹ Volver al resumen</button>
-      <p class="nota-pdf">Se abrirá el diálogo de impresión: elige «Guardar como PDF». La hoja ya está configurada en horizontal (A4).</p>
-      <button class="boton-principal compacto" data-accion="imprimir-pdf">Guardar como PDF</button>
+      <p class="nota-pdf">«Descargar PDF» genera el archivo A4 horizontal listo para guardar, enviar o imprimir.</p>
+      <div class="acciones-pdf">
+        <button class="boton-secundario" data-accion="imprimir-pdf">Imprimir</button>
+        <button class="boton-principal compacto" data-accion="descargar-pdf" data-mes="${mes}">Descargar PDF</button>
+      </div>
     </div>
     <div class="documento">
       <header class="doc-membrete">
@@ -643,7 +653,7 @@ function vistaPdf(mes) {
         </div>
 
         <h3>Detalle por día</h3>
-        <div class="doc-scroll">
+        ${resumen.diasDeClase.length ? `<div class="doc-scroll">
           <table class="doc-tabla doc-matriz">
             <thead>
               <tr>
@@ -655,7 +665,8 @@ function vistaPdf(mes) {
             <tbody>${filasMatriz}</tbody>
           </table>
         </div>
-        <p class="doc-nota">Cada columna es un día de clase del mes (número del día). Las letras siguen la misma convención del resumen.</p>
+        <p class="doc-nota">Cada columna es un día de clase del mes (número del día). Las letras siguen la misma convención del resumen.</p>`
+          : `<p class="doc-vacio">Este mes todavía no tiene días de clase registrados.</p>`}
       </section>
 
       <footer class="doc-pie">
@@ -1072,6 +1083,37 @@ function exportarExcelDelMes() {
   avisar("Excel del mes descargado.");
 }
 
+async function descargarInformePdf(boton) {
+  if (boton.disabled) return;
+  const mes = boton.dataset.mes || estado.mesVista;
+  const textoOriginal = boton.textContent;
+  boton.disabled = true;
+  boton.textContent = "Preparando…";
+  try {
+    await asegurarMes(mes);
+    const blob = await crearInformePdf(datosInforme(mes));
+    const nombre = nombreInformePdf(mes);
+    const archivo = new File([blob], nombre, { type: "application/pdf" });
+    const tactil = window.matchMedia("(pointer: coarse)").matches;
+    if (tactil && navigator.canShare?.({ files: [archivo] })) {
+      try {
+        await navigator.share({ files: [archivo], title: nombre });
+        return;
+      } catch (error) {
+        if (error?.name === "AbortError") return;
+      }
+    }
+    descargar(nombre, blob, "application/pdf");
+    avisar("Informe PDF descargado.");
+  } catch (error) {
+    console.error(error);
+    avisar("No se pudo generar el PDF. Revisa la conexión o usa «Imprimir».", "error");
+  } finally {
+    boton.disabled = false;
+    boton.textContent = textoOriginal;
+  }
+}
+
 async function descargarRespaldo() {
   try {
     const datos = await repo.exportarTodo();
@@ -1268,6 +1310,9 @@ app.addEventListener("click", async (evento) => {
       break;
     case "imprimir-pdf":
       window.print();
+      break;
+    case "descargar-pdf":
+      await descargarInformePdf(elemento);
       break;
     case "respaldo":
       await descargarRespaldo();

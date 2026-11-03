@@ -39,7 +39,7 @@ Para importarlo: abre la app **desde el computador** donde está el archivo → 
 - El repositorio y la página **jamás** contienen nombres de estudiantes: solo el código.
 - **Descargar respaldo (JSON)** guarda todo el histórico; **Restaurar respaldo** lo vuelve a subir (también sirve para migrar de plataforma).
 - **Descargar Excel del mes** produce un `.xlsx` con cinco hojas: Lista, Resumen del mes, Detalle por día, Días del mes y Estadísticas.
-- **Informe PDF (horizontal)**: hoja A4 horizontal con membrete institucional (escudo, nombre y resolución), resumen por estudiante, estadísticas del curso y detalle por día. Se abre la vista previa y se guarda como PDF desde el diálogo del navegador.
+- **Informe PDF (horizontal)**: hoja A4 horizontal con membrete institucional (escudo, nombre y resolución), resumen por estudiante, estadísticas del curso y detalle por día. Se abre la vista previa y **Descargar PDF** genera el archivo directamente (en el celular abre el menú Compartir para guardarlo en Archivos, enviarlo o imprimirlo); **Imprimir** sigue disponible en el computador.
 - **Exportar lista (CSV)** descarga el listado de estudiantes (Mat. No., No., nombre, estado) desde la pantalla Lista.
 - Los CSV usan separador `;` y vienen con codificación para Excel; la columna «Inas.» coincide con las planillas institucionales.
 
@@ -51,6 +51,7 @@ app.js                  Router, vistas y acciones
 src/dominio.js          Lógica pura (conteos, alertas, CSV) — con pruebas
 src/datos.js            Repositorios: Firebase (real) y demo (local)
 src/xlsx.js             Generador de Excel (.xlsx) sin dependencias
+src/pdf.js              Informe PDF (jsPDF desde cdnjs, se carga solo al abrir el informe)
 src/firebase-config.js  Configuración web de Firebase (claves públicas)
 src/estilos.css         Estilos
 firestore.rules         Reglas de seguridad de Firestore

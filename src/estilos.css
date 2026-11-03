@@ -922,6 +922,17 @@ textarea {
   color: var(--suave);
 }
 
+.acciones-pdf {
+  display: flex;
+  gap: 8px;
+}
+
+.doc-vacio {
+  font-size: 9pt;
+  color: #5b6675;
+  margin: 0;
+}
+
 .documento {
   max-width: 1100px;
   width: calc(100% - 28px);
@@ -1163,6 +1174,15 @@ textarea {
   .barra-pdf .nota-pdf {
     display: none;
   }
+
+  .doc-membrete {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .doc-titulo {
+    text-align: left;
+  }
 }
 
 @media print {
@@ -1191,5 +1211,24 @@ textarea {
 
   .doc-seccion {
     margin-top: 10px;
+  }
+
+  .doc-tabla thead {
+    display: table-header-group;
+  }
+
+  .doc-tabla tfoot {
+    display: table-row-group;
+  }
+
+  .doc-tabla tr,
+  .doc-stat {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .doc-seccion h3 {
+    break-after: avoid;
+    page-break-after: avoid;
   }
 }
