@@ -7,7 +7,7 @@
 
 import { FIREBASE_CONFIG } from "./firebase-config.js";
 import { claveDeFecha, mesSiguiente, mesAnterior, claveRegistro } from "./dominio.js";
-import { festivo } from "./festivos.js";
+import { diaNoLectivo } from "./festivos.js";
 
 const VERSION_FIREBASE = "11.0.2";
 const urlSdk = (paquete) => `https://www.gstatic.com/firebasejs/${VERSION_FIREBASE}/${paquete}.js`;
@@ -207,9 +207,9 @@ export function sembrarDemo() {
       const fecha = claveDeFecha(new Date(anio, numeroMes - 1, dia));
       if (fecha > ayer) break;
       const semana = new Date(anio, numeroMes - 1, dia).getDay();
-      if (semana === 0 || semana === 6 || festivo(fecha)) continue;
+      if (semana === 0 || semana === 6 || diaNoLectivo(fecha)) continue;
       if (indiceClase === 6) {
-        dias[fecha] = { fecha, tipo: "sinClase", motivo: "Festivo", nota: "" };
+        dias[fecha] = { fecha, tipo: "sinClase", motivo: "Permiso", nota: "" };
         indiceClase++;
         continue;
       }

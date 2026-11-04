@@ -8,7 +8,7 @@ import * as D from "./src/dominio.js";
 import * as A from "./src/analisis.js";
 import { INSTITUCION, cursosDe, slugCurso } from "./src/config.js";
 import { icono } from "./src/iconos.js";
-import { festivo } from "./src/festivos.js";
+import { diaNoLectivo } from "./src/festivos.js";
 import {
   datosDelMes, excelDelMes, csvResumenDelMes, csvDetalleDelMes, csvListaDelCurso, nombreArchivo,
 } from "./src/exportes.js";
@@ -586,6 +586,12 @@ function graficoNovedades(porDia, { compacto = false } = {}) {
   `;
 }
 
+function pastillaNoLectivo(noLectivo) {
+  return noLectivo.tipo === "festivo"
+    ? `<span class="pastilla pastilla-sol">${icono("calendario", { tamano: 15 })}Festivo</span>`
+    : `<span class="pastilla pastilla-marca">${icono("calendario", { tamano: 15 })}Receso estudiantil</span>`;
+}
+
 function fichaAlumno(estudiante, { tamano = "" } = {}) {
   return `<span class="avatar ${tamano}" aria-hidden="true">${esc(A.iniciales(estudiante.nombre))}</span>`;
 }
@@ -601,14 +607,16 @@ function vistaHoy() {
   const lista = activos();
   const finDeSemana = A.esFinDeSemanaFecha(hoy);
   const pendientes = A.diasPendientes(mes, cache.dias, hoy);
-  const festivoHoy = A.festivoPendiente(hoy, cache.dias);
+  const noLectivoHoy = A.noLectivoPendiente(hoy, cache.dias);
 
   let tarjetaPase;
-  if (festivoHoy) {
+  if (noLectivoHoy) {
     tarjetaPase = `
       <div class="pase-estado">
-        <span class="pastilla pastilla-sol">${icono("calendario", { tamano: 15 })}Festivo</span>
-        <p class="pase-texto">Hoy es festivo en Colombia: <strong>${esc(festivoHoy)}</strong>. No hay clase programada ni genera faltas.</p>
+        ${pastillaNoLectivo(noLectivoHoy)}
+        <p class="pase-texto">${noLectivoHoy.tipo === "festivo"
+          ? `Hoy es festivo en Colombia: <strong>${esc(noLectivoHoy.nombre)}</strong>.`
+          : `Semana de receso estudiantil (<strong>${esc(noLectivoHoy.nombre.toLowerCase())}</strong>).`} No hay clase programada ni genera faltas.</p>
       </div>
       <div class="pase-acciones">
         <a class="boton boton-secundario" href="#/dia/${hoy}">Pasar lista de todos modos</a>
@@ -790,14 +798,14 @@ function vistaCalendario(mes) {
     const futuro = fecha > hoy;
     const finde = D.esFinDeSemana(mes, numero);
     const dia = cache.dias.get(fecha);
-    const nombreFestivo = A.festivoPendiente(fecha, cache.dias);
+    const noLectivo = A.noLectivoPendiente(fecha, cache.dias);
     const clases = ["cal-dia"];
     let detalle = "";
     let descripcion = "";
-    if (nombreFestivo) {
-      clases.push("cal-festivo");
-      detalle = `<span class="cal-motivo" title="${esc(nombreFestivo)}">${esc(nombreFestivo)}</span>`;
-      descripcion = `festivo: ${nombreFestivo}`;
+    if (noLectivo) {
+      clases.push(noLectivo.tipo === "festivo" ? "cal-festivo" : "cal-receso");
+      detalle = `<span class="cal-motivo" title="${esc(A.textoNoLectivo(noLectivo))}">${esc(noLectivo.nombre)}</span>`;
+      descripcion = A.textoNoLectivo(noLectivo).toLowerCase();
     } else if (dia?.tipo === "sinClase") {
       clases.push("cal-sin-clase");
       detalle = `<span class="cal-motivo">${esc(dia.motivo || "Sin clase")}</span>`;
@@ -826,7 +834,7 @@ function vistaCalendario(mes) {
     if (futuro) clases.push("cal-futuro");
     const etiqueta = `${capitalizar(D.fechaHumana(fecha))}${descripcion ? `, ${descripcion}` : ""}`;
     celdas += futuro
-      ? `<span class="${clases.join(" ")}" aria-label="${esc(etiqueta)}"><span class="cal-numero">${numero}</span>${nombreFestivo ? detalle : ""}</span>`
+      ? `<span class="${clases.join(" ")}" aria-label="${esc(etiqueta)}"><span class="cal-numero">${numero}</span>${noLectivo ? detalle : ""}</span>`
       : `<a class="${clases.join(" ")}" href="#/dia/${fecha}" aria-label="${esc(etiqueta)}" ${fecha === hoy ? 'aria-current="date"' : ""}><span class="cal-numero">${numero}</span>${detalle}</a>`;
   }
 
@@ -848,6 +856,7 @@ function vistaCalendario(mes) {
           <span><i class="punto punto-pendiente"></i>Pendiente</span>
           <span><i class="punto punto-sin-clase"></i>Sin clase</span>
           <span><i class="punto punto-festivo"></i>Festivo</span>
+          <span><i class="punto punto-receso"></i>Receso</span>
           <span><i class="punto punto-hoy"></i>Hoy</span>
         </div>
       </section>
@@ -881,7 +890,7 @@ function vistaDia(fecha) {
   const cache = estado.cache.get(fecha.slice(0, 7));
   const dia = cache.dias.get(fecha) || null;
   const sinClase = dia?.tipo === "sinClase";
-  const nombreFestivo = A.festivoPendiente(fecha, cache.dias);
+  const noLectivo = A.noLectivoPendiente(fecha, cache.dias);
   const lista = activos();
   const hoy = D.hoyClave();
   const anterior = A.sumarDias(fecha, -1);
@@ -892,7 +901,7 @@ function vistaDia(fecha) {
 
   let estadoDia;
   if (sinClase) estadoDia = `<span class="pastilla pastilla-gris">${icono("sinClase", { tamano: 15 })}Sin clase</span>`;
-  else if (nombreFestivo) estadoDia = `<span class="pastilla pastilla-sol">${icono("calendario", { tamano: 15 })}Festivo</span>`;
+  else if (noLectivo) estadoDia = pastillaNoLectivo(noLectivo);
   else if (dia) estadoDia = `<span class="pastilla pastilla-verde">${icono("check", { tamano: 15 })}Registrado</span>`;
   else estadoDia = `<span class="pastilla pastilla-ambar">${icono("reloj", { tamano: 15 })}Sin registrar</span>`;
 
@@ -950,11 +959,11 @@ function vistaDia(fecha) {
   return `
     <section class="vista vista-dia">
       ${encabezado}
-      ${nombreFestivo ? `
-        <section class="tarjeta tarjeta-festivo">
+      ${noLectivo ? `
+        <section class="tarjeta tarjeta-festivo${noLectivo.tipo === "receso" ? " tarjeta-receso" : ""}">
           <div class="sin-clase-icono">${icono("calendario", { tamano: 26 })}</div>
           <div>
-            <h2>Festivo: ${esc(nombreFestivo)}</h2>
+            <h2>${esc(A.textoNoLectivo(noLectivo))}</h2>
             <p>No hay clase programada y el día no cuenta en el resumen. Si hubo jornada, pasa lista como siempre y quedará como día de clase.</p>
           </div>
         </section>
@@ -964,7 +973,7 @@ function vistaDia(fecha) {
         <div class="resumen-dia-pie">
           <span class="resumen-dia-pct">Asistencia del día <strong>${porcentaje ?? "—"} %</strong></span>
           <div class="acciones-dia">
-            <button type="button" class="boton ${dia || nombreFestivo ? "boton-secundario" : "boton-primario"} boton-chico" data-accion="todos-presentes" data-fecha="${fecha}">${icono("checkDoble", { tamano: 17 })}Todos presentes</button>
+            <button type="button" class="boton ${dia || noLectivo ? "boton-secundario" : "boton-primario"} boton-chico" data-accion="todos-presentes" data-fecha="${fecha}">${icono("checkDoble", { tamano: 17 })}Todos presentes</button>
             <button type="button" class="boton boton-secundario boton-chico" data-accion="abrir-nota-dia" data-fecha="${fecha}">${icono("nota", { tamano: 17 })}${dia?.nota ? "Nota del día" : "Agregar nota"}</button>
             <button type="button" class="boton boton-secundario boton-chico" data-accion="abrir-sin-clase" data-fecha="${fecha}">${icono("sinClase", { tamano: 17 })}Sin clase</button>
           </div>
@@ -1332,7 +1341,8 @@ function hojaSinClase({ fecha, motivo = "" }) {
   const cache = estado.cache.get(fecha.slice(0, 7));
   const marcas = A.registrosDelDia(cache.registros, fecha).length;
   const dia = cache.dias.get(fecha);
-  const actual = motivo || dia?.motivo || (festivo(fecha) ? "Festivo" : "");
+  const calendario = diaNoLectivo(fecha);
+  const actual = motivo || dia?.motivo || (calendario ? (calendario.tipo === "festivo" ? "Festivo" : calendario.nombre) : "");
   const personalizado = actual && !D.MOTIVOS_SIN_CLASE.includes(actual) ? actual : "";
   return `
     ${cabeceraHoja("Marcar sin clase", esc(capitalizar(D.fechaHumana(fecha))))}

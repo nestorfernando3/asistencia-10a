@@ -60,3 +60,8 @@ export function cursosDe(correo) {
 export function slugCurso(curso) {
   return curso.nombre.replace(/[°\s]/g, "").replace(/-/g, "");
 }
+
+// Semanas de receso estudiantil fijadas por la Secretaría de Educación cuando difieren
+// de las calculadas (Semana Santa y la semana anterior al festivo de octubre).
+// Ejemplo: 2027: [{ desde: "2027-03-22", hasta: "2027-03-26", nombre: "Receso de Semana Santa" }]
+export const RECESOS_AJUSTADOS = {};

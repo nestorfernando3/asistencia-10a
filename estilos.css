@@ -1197,6 +1197,11 @@ button:disabled {
   background: var(--sol);
 }
 
+.punto-receso {
+  background: var(--marca-suave);
+  border: 1px solid var(--marca);
+}
+
 .punto-hoy {
   border: 2px solid var(--marca);
   background: transparent;
@@ -1333,6 +1338,22 @@ a.cal-dia:hover {
 
 .cal-festivo .cal-motivo {
   color: var(--marca-fuerte);
+  hyphens: auto;
+  overflow-wrap: anywhere;
+}
+
+.cal-receso {
+  background: var(--marca-suave);
+  border: 1px solid color-mix(in srgb, var(--marca) 25%, transparent);
+}
+
+.cal-receso.cal-futuro {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.cal-receso .cal-motivo {
+  color: var(--marca);
   hyphens: auto;
   overflow-wrap: anywhere;
 }
@@ -1490,6 +1511,16 @@ a.cal-dia:hover {
 .tarjeta-festivo .sin-clase-icono {
   background: var(--sol);
   color: #182235;
+}
+
+.tarjeta-receso {
+  background: linear-gradient(150deg, var(--marca-suave), var(--superficie) 80%);
+  border-color: color-mix(in srgb, var(--marca) 30%, var(--linea));
+}
+
+.tarjeta-receso .sin-clase-icono {
+  background: var(--marca);
+  color: var(--marca-tinta);
 }
 
 .sin-clase-acciones {

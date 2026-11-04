@@ -291,12 +291,12 @@ function panelAtencion(doc, { resumen, sinClase }, x, y, ancho, alto) {
   if (!sinClase.length) {
     texto(doc, "Ninguno en el mes.", xi, yi, { tamano: 7.5, color: C.tinta3 });
   } else {
-    for (const dia of sinClase.slice(0, 5)) {
+    for (const dia of sinClase.slice(0, 10)) {
       texto(doc, diaCorto(dia.fecha), xi, yi, { tamano: 7.5, negrita: true, color: C.tinta2 });
       texto(doc, dia.motivo || "Sin motivo registrado", xi + 15, yi, { tamano: 7.5, color: C.tinta2 });
       yi += 4.2;
     }
-    if (sinClase.length > 5) texto(doc, `y ${sinClase.length - 5} más.`, xi, yi, { tamano: 7, color: C.tinta3 });
+    if (sinClase.length > 10) texto(doc, `y ${sinClase.length - 10} más.`, xi, yi, { tamano: 7, color: C.tinta3 });
   }
 }
 

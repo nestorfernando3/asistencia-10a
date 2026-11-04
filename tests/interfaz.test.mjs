@@ -31,8 +31,9 @@ test("nombreVisible respeta partículas y tildes", () => {
 
 test("diasPendientes cuenta solo días hábiles pasados sin registro", () => {
   const mapa = new Map(dias.map((dia) => [dia.fecha, dia]));
-  const pendientes = A.diasPendientes("2026-10", mapa, "2026-10-09");
-  assert.deepEqual(pendientes, ["2026-10-06", "2026-10-07", "2026-10-08"]);
+  // 5 al 9 de octubre es receso y el 12 es festivo: no cuentan como pendientes.
+  const pendientes = A.diasPendientes("2026-10", mapa, "2026-10-17");
+  assert.deepEqual(pendientes, ["2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"]);
 });
 
 test("observacionesDelMes incluye observaciones y notas del día en orden", () => {
@@ -122,13 +123,30 @@ test("festivos de Colombia coinciden con el calendario oficial", async () => {
 test("los festivos no son pendientes y aparecen como días sin clase sin tocar los conteos", () => {
   const diasNov = new Map([["2026-11-03", { fecha: "2026-11-03", tipo: "clase", nota: "" }]]);
   assert.deepEqual(A.diasPendientes("2026-11", diasNov, "2026-11-06"), ["2026-11-04", "2026-11-05"]);
-  assert.equal(A.festivoPendiente("2026-11-02", diasNov), "Todos los Santos");
+  assert.deepEqual(A.noLectivoPendiente("2026-11-02", diasNov), { tipo: "festivo", nombre: "Todos los Santos" });
   // Si se pasó lista en un festivo, cuenta como día de clase y deja de mostrarse como festivo.
-  assert.equal(A.festivoPendiente("2026-11-02", new Map([["2026-11-02", { fecha: "2026-11-02", tipo: "clase" }]])), null);
+  assert.equal(A.noLectivoPendiente("2026-11-02", new Map([["2026-11-02", { fecha: "2026-11-02", tipo: "clase" }]])), null);
   const datos = datosDelMes({ estudiantes, dias: [...diasNov.values()], registros: [], ajustes: null, mes: "2026-11" });
   assert.deepEqual(datos.sinClase.map((dia) => [dia.fecha, dia.motivo]), [
     ["2026-11-02", "Festivo: Todos los Santos"],
     ["2026-11-16", "Festivo: Independencia de Cartagena"],
   ]);
   assert.equal(datos.resumen.totales.diasDeClase, 1);
+});
+
+test("semanas de receso de Semana Santa y octubre (calendario A)", async () => {
+  const { recesosDelAnio, diaNoLectivo } = await import("../src/festivos.js");
+  assert.deepEqual([...recesosDelAnio(2026).keys()], [
+    "2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02", "2026-04-03",
+    "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09",
+  ]);
+  assert.equal(recesosDelAnio(2025).get("2025-10-06"), "Receso de octubre");
+  assert.equal(recesosDelAnio(2025).get("2025-04-14"), "Receso de Semana Santa");
+  assert.deepEqual(diaNoLectivo("2026-03-31"), { tipo: "receso", nombre: "Receso de Semana Santa" });
+  assert.deepEqual(diaNoLectivo("2026-04-03"), { tipo: "festivo", nombre: "Viernes Santo" });
+
+  const datosOct = datosDelMes({ estudiantes, dias: [], registros: [], ajustes: null, mes: "2026-10" });
+  assert.deepEqual(datosOct.sinClase.map((dia) => dia.fecha), ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-12"]);
+  assert.equal(datosOct.sinClase[0].motivo, "Receso de octubre");
+  assert.ok(!A.diasPendientes("2026-10", new Map(), "2026-10-14").some((fecha) => fecha >= "2026-10-05" && fecha <= "2026-10-12"));
 });

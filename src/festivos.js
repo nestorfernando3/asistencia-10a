@@ -4,6 +4,7 @@
 // cuenta como día de clase normal.
 
 import { claveDeFecha } from "./dominio.js";
+import { RECESOS_AJUSTADOS } from "./config.js";
 
 // Fechas que no se trasladan.
 const FIJOS = [
@@ -89,4 +90,54 @@ export function festivo(fecha) {
 
 export function festivosDelMes(mes) {
   return [...festivosDelAnio(Number(mes.slice(0, 4)))].filter(([fecha]) => fecha.startsWith(mes));
+}
+
+// ——— Semanas de receso estudiantil (calendario A, colegios oficiales) ———
+// Semana Santa: lunes a viernes de la semana mayor (jueves y viernes son además festivos).
+// Octubre: cinco días en la semana inmediatamente anterior al festivo del 12 de octubre
+// (Decreto 1373 de 2007, compilado en el Decreto 1075 de 2015).
+// Si la Secretaría de Educación fija otras fechas para un año, se escriben en
+// RECESOS_AJUSTADOS (config.js) y reemplazan las calculadas para ese año.
+
+function semanaHabil(lunes, nombre) {
+  return Array.from({ length: 5 }, (_, indice) => [claveDeFecha(desplazar(lunes, indice)), nombre]);
+}
+
+const cacheRecesos = new Map();
+
+// Mapa AAAA-MM-DD → nombre del receso.
+export function recesosDelAnio(anio) {
+  if (cacheRecesos.has(anio)) return cacheRecesos.get(anio);
+  let lista;
+  if (RECESOS_AJUSTADOS[anio]) {
+    lista = [];
+    for (const { desde, hasta, nombre } of RECESOS_AJUSTADOS[anio]) {
+      for (let fecha = new Date(`${desde}T00:00:00`); claveDeFecha(fecha) <= hasta; fecha = desplazar(fecha, 1)) {
+        lista.push([claveDeFecha(fecha), nombre]);
+      }
+    }
+  } else {
+    const lunesSanto = desplazar(pascua(anio), -6);
+    const festivoOctubre = alLunes(new Date(anio, 9, 12));
+    lista = [
+      ...semanaHabil(lunesSanto, "Receso de Semana Santa"),
+      ...semanaHabil(desplazar(festivoOctubre, -7), "Receso de octubre"),
+    ];
+  }
+  const mapa = new Map(lista.sort(([a], [b]) => a.localeCompare(b)));
+  cacheRecesos.set(anio, mapa);
+  return mapa;
+}
+
+export function receso(fecha) {
+  return recesosDelAnio(Number(fecha.slice(0, 4))).get(fecha) || null;
+}
+
+// Día sin clase según el calendario: { tipo: "festivo" | "receso", nombre } o null.
+// El festivo tiene prioridad (Jueves y Viernes Santo se muestran como festivos).
+export function diaNoLectivo(fecha) {
+  const nombreFestivo = festivo(fecha);
+  if (nombreFestivo) return { tipo: "festivo", nombre: nombreFestivo };
+  const nombreReceso = receso(fecha);
+  return nombreReceso ? { tipo: "receso", nombre: nombreReceso } : null;
 }
