@@ -5,6 +5,16 @@ Aplicación web para pasar lista a diario al curso 10°-A: calendario mensual, u
 - **App publicada**: https://nestorfernando3.github.io/asistencia-10a/
 - Diseño acordado: `DISEÑO.md` · Glosario: `GLOSSARY.md` · Decisión de plataforma: `docs/adr/0001-firebase-y-github-pages.md`
 
+## Versión 2 (propuesta)
+
+Interfaz nueva en `v2/` (https://nestorfernando3.github.io/asistencia-10a/v2/ una vez publicada), conectada a **la misma base de datos** y con los mismos documentos: se puede usar en paralelo con la versión clásica sin migrar nada. Demo con datos ficticios: `v2/?demo=1`.
+
+- **Hoy**: estado del pase del día, días hábiles sin registrar, el mes en cifras, estudiantes con alerta y observaciones recientes.
+- **Pase del día**: contadores que filtran, búsqueda, selector P/A/T/E grande, observaciones con etiquetas, nota del día, «sin clase» y aviso con «Deshacer» tras cada cambio.
+- **Calendario** con porcentaje de asistencia por día; **Resumen** con gráfico de novedades, tabla ordenable y ficha mensual de cada estudiante.
+- **Documentos**: informe PDF A4 horizontal (panorama, tabla con barras, matriz coloreada, observaciones opcionales y firmas), libro de Excel con formato (cinco hojas con membrete y escudo) y los mismos CSV de siempre.
+- Preparada para varios cursos y docentes: ver `docs/adr/0002-interfaz-v2-y-modelo-multicurso.md`.
+
 ## Uso diario
 
 1. Abre la app (mejor: agrégala a la pantalla de inicio desde el navegador del celular).
@@ -58,6 +68,7 @@ firestore.rules         Reglas de seguridad de Firestore
 herramientas/           Script que genera la lista base desde el registro P3
 datos-base/             Lista base y respaldos locales (ignorado por git)
 tests/                  Pruebas de la lógica (node --test)
+v2/                     Interfaz nueva (misma base de datos): app.js, estilos.css, src/, vendor/
 ```
 
 ## Desarrollo
