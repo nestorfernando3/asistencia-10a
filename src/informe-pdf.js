@@ -1,9 +1,9 @@
 // Informe mensual de asistencia en PDF (A4 horizontal).
 //
-// jsPDF y jspdf-autotable viven en v2/vendor (copias idénticas a las de cdnjs,
+// jsPDF y jspdf-autotable viven en vendor/ (copias idénticas a las de cdnjs,
 // verificadas con su hash SRI), así el informe no depende de un CDN externo.
 
-import * as D from "../../src/dominio.js";
+import * as D from "./dominio.js";
 import { inicialDia, nivelAsistencia, diaCorto } from "./analisis.js";
 
 const LIBRERIAS = [

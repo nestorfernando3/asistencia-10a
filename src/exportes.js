@@ -1,7 +1,7 @@
 // Datos del mes y documentos exportables (Excel con formato y CSV de planillas).
 // Todo es puro: recibe los datos y devuelve estructuras o bytes.
 
-import * as D from "../../src/dominio.js";
+import * as D from "./dominio.js";
 import { observacionesDelMes, diasSinClase, diaCorto, inicialDia } from "./analisis.js";
 import { crearLibroXlsx, referencia } from "./libro-xlsx.js";
 

@@ -1,12 +1,12 @@
 {
-  "name": "Asistencia 10°-A · IED Brisas del Río",
-  "short_name": "Asistencia 10°-A",
-  "description": "Pase de lista diario del curso 10°-A",
+  "name": "Asistencia · IED Brisas del Río",
+  "short_name": "Asistencia",
+  "description": "Pase de lista diario, resumen mensual e informes",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f4f7fa",
-  "theme_color": "#1e5fa8",
+  "background_color": "#f4f2eb",
+  "theme_color": "#f4f2eb",
   "icons": [
     { "src": "icono.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
     { "src": "icono-192.png", "sizes": "192x192", "type": "image/png" },

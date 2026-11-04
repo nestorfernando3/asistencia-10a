@@ -10,7 +10,8 @@ const LIBRERIAS = [
     integrity: "sha384-fCAW/rDWORTbQXSiB7mOg0QtQ5c+r0f544y6XoKjuVva0nMBlCpNUjiFeG5iMdS3",
   },
 ];
-const RUTA_LOGO = "assets/institution/logo_colegio.png";
+// Relativa a la página de la versión clásica (clasica/index.html).
+const RUTA_LOGO = "../assets/institution/logo_colegio.png";
 
 const COLOR = {
   azul: [30, 95, 168],

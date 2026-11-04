@@ -1,12 +1,12 @@
-// Acceso a datos de la versión 2.
+// Acceso a datos de la interfaz principal.
 //
 // Lee y escribe exactamente los mismos documentos que la versión clásica
 // (src/datos.js): estudiantes/{mat}, dias/{AAAA-MM-DD}, asistencia/{AAAA-MM-DD}_{mat}
 // y ajustes/config, con la misma forma. La única diferencia es que cada curso
 // trae sus rutas (ver config.js), lo que deja lista la app para varios cursos.
 
-import { FIREBASE_CONFIG } from "../../src/firebase-config.js";
-import { claveDeFecha, mesSiguiente, mesAnterior, claveRegistro } from "../../src/dominio.js";
+import { FIREBASE_CONFIG } from "./firebase-config.js";
+import { claveDeFecha, mesSiguiente, mesAnterior, claveRegistro } from "./dominio.js";
 
 const VERSION_FIREBASE = "11.0.2";
 const urlSdk = (paquete) => `https://www.gstatic.com/firebasejs/${VERSION_FIREBASE}/${paquete}.js`;

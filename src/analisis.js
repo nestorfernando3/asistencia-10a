@@ -1,7 +1,7 @@
-// Lógica pura propia de la versión 2. Se apoya en src/dominio.js (conteos,
+// Lógica pura de la interfaz principal. Se apoya en src/dominio.js (conteos,
 // alertas y CSV compartidos con la versión clásica) y no toca datos.
 
-import * as D from "../../src/dominio.js";
+import * as D from "./dominio.js";
 
 const PARTICULAS = new Set(["de", "del", "la", "las", "los", "y", "da", "van", "von"]);
 const DIAS_CORTOS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];

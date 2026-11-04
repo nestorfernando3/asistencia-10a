@@ -11,7 +11,7 @@ export const INSTITUCION = {
   nombreCorto: "IED Brisas del Río",
   resolucion: "Resolución 5256 de 2017",
   ciudad: "Barranquilla, Atlántico",
-  escudo: "../assets/institution/logo_colegio.png",
+  escudo: "assets/institution/logo_colegio.png",
 };
 
 function rutasRaiz() {

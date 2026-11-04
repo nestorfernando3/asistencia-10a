@@ -5,9 +5,12 @@ Aplicación web para pasar lista a diario al curso 10°-A: calendario mensual, u
 - **App publicada**: https://nestorfernando3.github.io/asistencia-10a/
 - Diseño acordado: `DISEÑO.md` · Glosario: `GLOSSARY.md` · Decisión de plataforma: `docs/adr/0001-firebase-y-github-pages.md`
 
-## Versión 2 (propuesta)
+## Versiones
 
-Interfaz nueva en `v2/` (https://nestorfernando3.github.io/asistencia-10a/v2/ una vez publicada), conectada a **la misma base de datos** y con los mismos documentos: se puede usar en paralelo con la versión clásica sin migrar nada. Demo con datos ficticios: `v2/?demo=1`.
+- **Principal** (raíz): interfaz nueva. Demo con datos ficticios: `?demo=1`.
+- **Clásica** (`clasica/`): la interfaz anterior, intacta y con los mismos datos. La dirección antigua `v2/` redirige a la principal.
+
+Ambas leen y escriben los mismos documentos de Firestore con la misma forma: no hubo migración y se pueden usar indistintamente.
 
 - **Hoy**: estado del pase del día, días hábiles sin registrar, el mes en cifras, estudiantes con alerta y observaciones recientes.
 - **Pase del día**: contadores que filtran, búsqueda, selector P/A/T/E grande, observaciones con etiquetas, nota del día, «sin clase» y aviso con «Deshacer» tras cada cambio.
@@ -56,19 +59,22 @@ Para importarlo: abre la app **desde el computador** donde está el archivo → 
 ## Estructura
 
 ```
-index.html              Interfaz (una sola página)
-app.js                  Router, vistas y acciones
-src/dominio.js          Lógica pura (conteos, alertas, CSV) — con pruebas
-src/datos.js            Repositorios: Firebase (real) y demo (local)
-src/xlsx.js             Generador de Excel (.xlsx) sin dependencias
-src/pdf.js              Informe PDF (jsPDF desde cdnjs, se carga solo al abrir el informe)
-src/firebase-config.js  Configuración web de Firebase (claves públicas)
-src/estilos.css         Estilos
-firestore.rules         Reglas de seguridad de Firestore
-herramientas/           Script que genera la lista base desde el registro P3
-datos-base/             Lista base y respaldos locales (ignorado por git)
-tests/                  Pruebas de la lógica (node --test)
-v2/                     Interfaz nueva (misma base de datos): app.js, estilos.css, src/, vendor/
+index.html, app.js, estilos.css   Interfaz principal (una sola página)
+manifest.webmanifest              Instalación en el celular
+src/config.js                     Institución y registro de cursos (rutas en Firestore, docentes)
+src/repositorio.js                Datos: Firebase (real) y demo (local), por curso
+src/analisis.js                   Lógica de pantalla (pendientes, observaciones, historial)
+src/exportes.js, libro-xlsx.js    Excel con formato y CSV de planillas
+src/informe-pdf.js                Informe PDF (jsPDF desde vendor/)
+src/dominio.js                    Lógica pura compartida (conteos, alertas, CSV) — con pruebas
+src/firebase-config.js            Configuración web de Firebase (claves públicas)
+vendor/                           jsPDF y jspdf-autotable (copias verificadas con SRI)
+clasica/                          Interfaz anterior (usa src/datos.js, src/pdf.js, src/xlsx.js, src/estilos.css)
+v2/                               Redirección de la dirección antigua a la principal
+firestore.rules                   Reglas de seguridad de Firestore
+herramientas/                     Script que genera la lista base desde el registro P3
+datos-base/                       Lista base y respaldos locales (ignorado por git)
+tests/                            Pruebas (node --test)
 ```
 
 ## Desarrollo

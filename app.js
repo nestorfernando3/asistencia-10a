@@ -1,28 +1,58 @@
-import { crearRepositorio, hayConfiguracion } from "./src/datos.js";
-import * as D from "./src/dominio.js";
-import { crearXlsx } from "./src/xlsx.js";
-import { crearInformePdf, nombreInformePdf, prepararLibrerias } from "./src/pdf.js";
+// Asistencia · interfaz principal.
+// Misma base de datos que la versión clásica (ver src/repositorio.js); interfaz,
+// navegación y documentos nuevos. Todo el estado de pantalla vive en `estado`
+// y cada cambio vuelve a pintar la vista con render().
 
-const app = document.getElementById("app");
-const buscador = new URLSearchParams(location.search);
+import { crearRepositorio } from "./src/repositorio.js";
+import * as D from "./src/dominio.js";
+import * as A from "./src/analisis.js";
+import { INSTITUCION, cursosDe, slugCurso } from "./src/config.js";
+import { icono } from "./src/iconos.js";
+import {
+  datosDelMes, excelDelMes, csvResumenDelMes, csvDetalleDelMes, csvListaDelCurso, nombreArchivo,
+} from "./src/exportes.js";
+import { crearInformePdf, prepararPdf } from "./src/informe-pdf.js";
+
+const raiz = document.getElementById("app");
+const zonaAvisos = document.querySelector(".avisos");
+const parametros = new URLSearchParams(location.search);
+const CLAVE_PREFERENCIAS = "asistencia.v2.preferencias";
+
+const LETRA = { [D.PRESENTE]: "p", [D.AUSENTE]: "a", [D.TARDE]: "t", [D.EXCUSA]: "e" };
+const PLURAL = {
+  [D.PRESENTE]: ["presente", "presentes"],
+  [D.AUSENTE]: ["ausente", "ausentes"],
+  [D.TARDE]: ["tarde", "tardes"],
+  [D.EXCUSA]: ["excusa", "excusas"],
+};
 
 const estado = {
   modo: null,
   usuario: null,
+  cursos: [],
+  curso: null,
+  espacio: null,
   estudiantes: [],
   ajustes: null,
   cache: new Map(),
-  mesVista: D.hoyClave().slice(0, 7),
-  diaVista: null,
-  deshacer: null,
-  comentarioAbierto: null,
+  mes: D.hoyClave().slice(0, 7),
+  rutaPintada: "",
+  hoja: null,
   etiquetasBorrador: [],
-  notaAbierta: false,
-  formulario: null,
+  busqueda: "",
+  filtro: null,
+  orden: "no",
+  deshacer: null,
+  guardando: 0,
+  errorGuardado: false,
+  incluirObservaciones: false,
+  generando: null,
 };
 
 let repo = null;
 let tokenRender = 0;
+
+// ——— Utilidades ———
 
 function esc(valor) {
   return String(valor ?? "").replace(/[&<>"']/g, (caracter) => (
@@ -30,96 +60,1420 @@ function esc(valor) {
   ));
 }
 
-function plural(cantidad, singular, formaPlural) {
-  return `${cantidad} ${cantidad === 1 ? singular : formaPlural}`;
+function plural(cantidad, singular, varios) {
+  return `${cantidad} ${cantidad === 1 ? singular : varios}`;
+}
+
+function capitalizar(texto) {
+  return texto ? texto.charAt(0).toUpperCase() + texto.slice(1) : texto;
 }
 
 function ordenarLocal(lista) {
   return [...lista].sort((a, b) => Number(a.no || 0) - Number(b.no || 0));
 }
 
-function avisar(texto, tipo = "ok") {
-  let contenedor = document.querySelector(".avisos");
-  if (!contenedor) {
-    contenedor = document.createElement("div");
-    contenedor.className = "avisos";
-    document.body.appendChild(contenedor);
-  }
-  const aviso = document.createElement("div");
-  aviso.className = `aviso ${tipo}`;
-  aviso.textContent = texto;
-  contenedor.appendChild(aviso);
-  setTimeout(() => aviso.remove(), 5000);
+function activos() {
+  return estado.estudiantes.filter((estudiante) => estudiante.estado !== "retirada");
 }
 
-function descargar(nombre, contenido, tipoContenido) {
-  const blob = new Blob([contenido], { type: tipoContenido });
+function leerPreferencias() {
+  try {
+    return JSON.parse(localStorage.getItem(CLAVE_PREFERENCIAS) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function guardarPreferencia(clave, valor) {
+  try {
+    localStorage.setItem(CLAVE_PREFERENCIAS, JSON.stringify({ ...leerPreferencias(), [clave]: valor }));
+  } catch {
+    // Sin almacenamiento local: la preferencia dura solo esta sesión.
+  }
+}
+
+function esTactil() {
+  return window.matchMedia("(pointer: coarse)").matches;
+}
+
+function descargar(nombre, contenido, tipo) {
+  const blob = contenido instanceof Blob ? contenido : new Blob([contenido], { type: tipo });
   const enlace = document.createElement("a");
   enlace.href = URL.createObjectURL(blob);
   enlace.download = nombre;
   document.body.appendChild(enlace);
   enlace.click();
   enlace.remove();
-  setTimeout(() => URL.revokeObjectURL(enlace.href), 1000);
+  setTimeout(() => URL.revokeObjectURL(enlace.href), 4000);
 }
 
+// En el celular (sobre todo en la app instalada) la descarga directa no siempre
+// funciona: se ofrece el menú Compartir para guardar en Archivos o enviar.
+async function entregarArchivo(nombre, blob) {
+  const archivo = new File([blob], nombre, { type: blob.type });
+  if (esTactil() && navigator.canShare?.({ files: [archivo] })) {
+    try {
+      await navigator.share({ files: [archivo], title: nombre });
+      return "compartido";
+    } catch (error) {
+      if (error?.name === "AbortError") return "cancelado";
+    }
+  }
+  descargar(nombre, blob);
+  return "descargado";
+}
+
+// ——— Avisos y estado de guardado ———
+
+function avisar(texto, { tipo = "ok", deshacer = false, duracion = 5000 } = {}) {
+  zonaAvisos.querySelectorAll(".aviso").forEach((otro) => {
+    if (deshacer || otro.dataset.deshacer) otro.remove();
+  });
+  const aviso = document.createElement("div");
+  aviso.className = `aviso aviso-${tipo}`;
+  aviso.setAttribute("role", tipo === "error" ? "alert" : "status");
+  if (deshacer) aviso.dataset.deshacer = "1";
+  aviso.innerHTML = `
+    <span class="aviso-icono">${icono(tipo === "error" ? "alerta" : "check", { tamano: 18 })}</span>
+    <span class="aviso-texto">${esc(texto)}</span>
+    ${deshacer ? `<button type="button" class="aviso-accion" data-accion="deshacer">${icono("deshacer", { tamano: 16 })}Deshacer</button>` : ""}
+  `;
+  zonaAvisos.appendChild(aviso);
+  requestAnimationFrame(() => aviso.classList.add("visible"));
+  setTimeout(() => {
+    aviso.classList.remove("visible");
+    setTimeout(() => aviso.remove(), 300);
+  }, duracion);
+}
+
+function pintarIndicador() {
+  const html = indicadorGuardado();
+  document.querySelectorAll("[data-rol='indicador']").forEach((nodo) => {
+    nodo.outerHTML = html;
+  });
+}
+
+function indicadorGuardado() {
+  if (estado.modo === "demo") {
+    return `<span class="indicador indicador-demo" data-rol="indicador" title="Los datos de la demo quedan solo en este navegador">${icono("info", { tamano: 15 })}<span>Demo</span></span>`;
+  }
+  if (estado.guardando > 0) {
+    return `<span class="indicador indicador-guardando" data-rol="indicador">${icono("nube", { tamano: 15 })}<span>Guardando…</span></span>`;
+  }
+  if (estado.errorGuardado) {
+    return `<span class="indicador indicador-error" data-rol="indicador">${icono("nubeError", { tamano: 15 })}<span>Sin guardar</span></span>`;
+  }
+  return `<span class="indicador" data-rol="indicador">${icono("check", { tamano: 15 })}<span>Guardado</span></span>`;
+}
+
+async function guardarEnSegundoPlano(tarea, mensajeError) {
+  estado.guardando++;
+  pintarIndicador();
+  try {
+    await tarea();
+    estado.errorGuardado = false;
+    return true;
+  } catch (error) {
+    console.error(error);
+    estado.errorGuardado = true;
+    avisar(mensajeError || "No se pudo guardar. Revisa la conexión.", { tipo: "error", duracion: 8000 });
+    return false;
+  } finally {
+    estado.guardando--;
+    pintarIndicador();
+  }
+}
+
+// ——— Arranque y datos ———
+
 async function iniciar() {
-  if (!hayConfiguracion() && !buscador.has("demo")) {
-    estado.modo = "sin-config";
-    render();
+  try {
+    repo = await crearRepositorio({ demo: parametros.has("demo") });
+  } catch (error) {
+    console.error(error);
+    raiz.innerHTML = vistaFallo("No se pudo conectar con la base de datos. Revisa el internet y recarga la página.");
     return;
   }
-  repo = await crearRepositorio({ demo: buscador.has("demo") || !hayConfiguracion() });
   estado.modo = repo.modo;
   repo.observarSesion(async (usuario) => {
     estado.usuario = usuario;
+    estado.cache.clear();
+    estado.deshacer = null;
+    estado.hoja = null;
     if (usuario) {
-      try {
-        estado.estudiantes = await repo.listarEstudiantes();
-        estado.ajustes = await repo.cargarAjustes();
-      } catch (error) {
-        console.error(error);
-        avisar("No se pudieron cargar los datos.", "error");
-      }
+      estado.cursos = estado.modo === "demo" ? cursosDe("") : cursosDe(usuario.email);
+      const preferido = leerPreferencias().curso;
+      estado.curso = estado.cursos.find((curso) => curso.id === preferido) || estado.cursos[0] || null;
+      await cargarCurso();
     } else {
+      estado.cursos = [];
+      estado.curso = null;
+      estado.espacio = null;
       estado.estudiantes = [];
-      estado.cache.clear();
-      estado.deshacer = null;
     }
     render();
   });
 }
 
-function parsearRuta() {
-  const bruto = location.hash.replace(/^#\/?/, "");
-  if (!bruto) return { vista: "mes", param: null };
-  const [vista, param] = bruto.split("/");
-  return { vista, param: param || null };
-}
-
-function actualizarEstiloPaginaPdf(activo) {
-  if (activo) {
-    if (!document.getElementById("estilo-pdf")) {
-      const estilo = document.createElement("style");
-      estilo.id = "estilo-pdf";
-      estilo.textContent = "@page { size: A4 landscape; margin: 9mm; }";
-      document.head.appendChild(estilo);
-    }
-  } else {
-    document.getElementById("estilo-pdf")?.remove();
+async function cargarCurso() {
+  estado.cache.clear();
+  estado.estudiantes = [];
+  estado.ajustes = null;
+  if (!estado.curso) return;
+  estado.espacio = repo.delCurso(estado.curso);
+  try {
+    const [estudiantes, ajustes] = await Promise.all([estado.espacio.listarEstudiantes(), estado.espacio.cargarAjustes()]);
+    estado.estudiantes = estudiantes;
+    estado.ajustes = ajustes;
+  } catch (error) {
+    console.error(error);
+    avisar("No se pudieron cargar los estudiantes.", { tipo: "error" });
   }
 }
 
-async function asegurarMes(claveMes) {
-  if (estado.cache.has(claveMes)) return estado.cache.get(claveMes);
-  const { dias, registros } = await repo.cargarMes(claveMes);
+async function asegurarMes(mes) {
+  if (estado.cache.has(mes)) return estado.cache.get(mes);
+  const { dias, registros } = await estado.espacio.cargarMes(mes);
   const cache = {
     dias: new Map(dias.map((dia) => [dia.fecha, dia])),
     registros: new Map(registros.map((registro) => [D.claveRegistro(registro.fecha, registro.mat), registro])),
   };
-  estado.cache.set(claveMes, cache);
+  estado.cache.set(mes, cache);
   return cache;
 }
+
+function datosMes(mes) {
+  const cache = estado.cache.get(mes);
+  return datosDelMes({
+    estudiantes: estado.estudiantes,
+    dias: [...cache.dias.values()],
+    registros: [...cache.registros.values()],
+    ajustes: estado.ajustes,
+    mes,
+  });
+}
+
+function umbrales() {
+  return { ...D.AJUSTES_POR_DEFECTO, ...(estado.ajustes || {}) };
+}
+
+// ——— Rutas ———
+
+const esMes = (valor) => /^\d{4}-\d{2}$/.test(valor || "");
+const esFecha = (valor) => /^\d{4}-\d{2}-\d{2}$/.test(valor || "");
+
+function ruta() {
+  const [vista = "hoy", param = null] = location.hash.replace(/^#\/?/, "").split("/");
+  return { vista: vista || "hoy", param };
+}
+
+function ir(destino) {
+  if (location.hash === destino) render();
+  else location.hash = destino;
+}
+
+async function render() {
+  const token = ++tokenRender;
+  const foco = document.activeElement?.dataset?.foco || null;
+  const seleccion = foco ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+
+  if (!estado.modo) return;
+  if (!estado.usuario) {
+    raiz.innerHTML = vistaEntrar();
+    estado.rutaPintada = "entrar";
+    return;
+  }
+  if (!estado.curso) {
+    raiz.innerHTML = vistaSinCursos();
+    return;
+  }
+
+  const { vista, param } = ruta();
+  const firma = `${vista}/${param || ""}`;
+  const cambioDeRuta = firma !== estado.rutaPintada;
+  if (cambioDeRuta) {
+    estado.busqueda = "";
+    estado.filtro = null;
+  }
+
+  let mes = estado.mes;
+  let fecha = null;
+  if (vista === "dia") {
+    fecha = esFecha(param) ? param : D.hoyClave();
+    if (fecha > D.hoyClave()) fecha = D.hoyClave();
+    mes = fecha.slice(0, 7);
+  } else if (vista === "hoy") {
+    mes = D.hoyClave().slice(0, 7);
+  } else if (esMes(param)) {
+    mes = param;
+  }
+
+  try {
+    if (vista !== "estudiantes" && !estado.cache.has(mes)) {
+      if (cambioDeRuta) raiz.innerHTML = marco(vista, `<div class="cargando-vista" role="status">${icono("reloj", { tamano: 22 })}<span>Cargando ${esc(D.mesHumano(mes).toLowerCase())}…</span></div>`);
+      await asegurarMes(mes);
+      if (token !== tokenRender) return;
+    }
+    if (vista !== "estudiantes") estado.mes = mes;
+
+    let contenido;
+    if (vista === "dia") contenido = vistaDia(fecha);
+    else if (vista === "calendario") contenido = vistaCalendario(mes);
+    else if (vista === "resumen") {
+      contenido = vistaResumen(mes);
+      // Deja lista la librería del informe mientras se revisa el resumen.
+      prepararPdf().catch(() => {});
+    }
+    else if (vista === "estudiantes") contenido = vistaEstudiantes();
+    else contenido = vistaHoy();
+
+    raiz.innerHTML = marco(vista, contenido) + hojaHtml();
+    raiz.classList.toggle("con-hoja", Boolean(estado.hoja));
+    document.body.classList.toggle("sin-scroll", Boolean(estado.hoja));
+  } catch (error) {
+    console.error(error);
+    raiz.innerHTML = marco(vista, vistaFallo("No se pudieron cargar los datos. Revisa la conexión e intenta de nuevo.", true));
+  }
+
+  if (cambioDeRuta) {
+    estado.rutaPintada = firma;
+    window.scrollTo({ top: 0 });
+    raiz.querySelector(".vista")?.classList.add("entra");
+  }
+  if (foco) {
+    const nodo = raiz.querySelector(`[data-foco="${foco}"]`);
+    if (nodo) {
+      nodo.focus({ preventScroll: true });
+      if (seleccion && typeof nodo.setSelectionRange === "function") {
+        try {
+          nodo.setSelectionRange(...seleccion);
+        } catch {
+          // Algunos campos (number) no admiten selección.
+        }
+      }
+    }
+  } else if (estado.hoja?.enfocar) {
+    (raiz.querySelector(".hoja [data-autofoco]") || raiz.querySelector(".hoja-cabecera .boton-icono"))?.focus();
+    estado.hoja.enfocar = false;
+  }
+}
+
+// ——— Marco de la app ———
+
+const NAVEGACION = [
+  ["hoy", "Hoy", "hoy"],
+  ["calendario", "Calendario", "calendario"],
+  ["resumen", "Resumen", "resumen"],
+  ["estudiantes", "Estudiantes", "estudiantes"],
+];
+
+function destinoDe(id) {
+  if (id === "calendario" || id === "resumen") return `#/${id}/${estado.mes}`;
+  return `#/${id}`;
+}
+
+function marco(vista, contenido) {
+  const activa = vista === "dia" ? "calendario" : vista;
+  const enlaces = NAVEGACION.map(([id, etiqueta, nombreIcono]) => `
+    <a href="${destinoDe(id)}" class="nav-enlace${activa === id ? " activo" : ""}" ${activa === id ? 'aria-current="page"' : ""}>
+      ${icono(nombreIcono, { tamano: 22 })}<span>${etiqueta}</span>
+    </a>
+  `).join("");
+  const varios = estado.cursos.length > 1;
+  const curso = `
+    <button type="button" class="selector-curso" data-accion="abrir-cursos" aria-label="Curso ${esc(estado.curso.nombre)}${varios ? ". Cambiar de curso" : ""}">
+      <span class="selector-curso-etiqueta">Curso</span>
+      <span class="selector-curso-nombre">${esc(estado.curso.nombre)}</span>
+      ${icono("abajo", { tamano: 16 })}
+    </button>
+  `;
+  return `
+    <div class="marco">
+      <aside class="lateral" aria-label="Navegación principal">
+        <div class="lateral-marca">
+          <img src="${INSTITUCION.escudo}" alt="" width="44" height="46">
+          <div>
+            <strong>Asistencia</strong>
+            <span>${esc(INSTITUCION.nombreCorto)}</span>
+          </div>
+        </div>
+        ${curso}
+        <nav class="lateral-nav">${enlaces}</nav>
+        <div class="lateral-pie">
+          ${indicadorGuardado()}
+          <span class="lateral-cuenta" title="${esc(estado.usuario?.email || "")}">${esc(estado.usuario?.email || "")}</span>
+        </div>
+      </aside>
+      <header class="barra-superior">
+        <div class="barra-marca">
+          <img src="${INSTITUCION.escudo}" alt="" width="32" height="33">
+          <span>Asistencia</span>
+        </div>
+        ${indicadorGuardado()}
+        ${curso}
+      </header>
+      ${estado.modo === "demo" ? `<div class="banda-demo">${icono("info", { tamano: 16 })}<span>Modo demo con datos ficticios: nada se guarda en la base real.</span></div>` : ""}
+      <main class="principal" id="principal">${contenido}</main>
+      <nav class="barra-inferior" aria-label="Navegación principal">${enlaces}</nav>
+    </div>
+  `;
+}
+
+function vistaFallo(mensaje, conReintento = false) {
+  return `
+    <section class="vista">
+      <div class="tarjeta tarjeta-vacia">
+        ${icono("nubeError", { tamano: 32 })}
+        <p>${esc(mensaje)}</p>
+        ${conReintento ? `<button type="button" class="boton boton-secundario" data-accion="reintentar">${icono("reiniciar", { tamano: 18 })}Reintentar</button>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function vistaSinCursos() {
+  return `
+    <main class="entrar">
+      <section class="entrar-tarjeta">
+        <img class="entrar-escudo" src="${INSTITUCION.escudo}" alt="Escudo de la ${esc(INSTITUCION.nombre)}" width="88" height="92">
+        <h1>Sin cursos asignados</h1>
+        <p class="entrar-texto">La cuenta ${esc(estado.usuario?.email || "")} todavía no tiene cursos. Pide que la agreguen en la configuración de la app.</p>
+        <button type="button" class="boton boton-secundario" data-accion="salir">${icono("salir", { tamano: 18 })}Cerrar sesión</button>
+      </section>
+    </main>
+  `;
+}
+
+function vistaEntrar() {
+  const demo = estado.modo === "demo";
+  return `
+    <main class="entrar">
+      <section class="entrar-portada" aria-hidden="true">
+        <div class="entrar-franjas"><span></span><span></span><span></span></div>
+        <img src="${INSTITUCION.escudo}" alt="" width="132" height="138">
+        <p class="entrar-lema">Ciencia · Tecnología · Virtud · Solidaridad</p>
+      </section>
+      <section class="entrar-tarjeta">
+        <img class="entrar-escudo" src="${INSTITUCION.escudo}" alt="Escudo de la ${esc(INSTITUCION.nombre)}" width="72" height="75">
+        <p class="sobretitulo">${esc(INSTITUCION.nombreCorto)}</p>
+        <h1>Asistencia escolar</h1>
+        <p class="entrar-texto">Pase de lista diario, resumen del mes e informes listos para entregar.</p>
+        ${demo ? `
+          <div class="nota-demo">${icono("info", { tamano: 18 })}<span>Modo demo: datos ficticios que se guardan solo en este navegador.</span></div>
+          <button type="button" class="boton boton-primario boton-grande" data-accion="entrar-demo">Entrar a la demo</button>
+        ` : `
+          <form class="formulario" data-accion="entrar" novalidate>
+            <label class="campo">
+              <span>Correo</span>
+              <input type="email" name="correo" autocomplete="username" inputmode="email" required>
+            </label>
+            <label class="campo">
+              <span>Contraseña</span>
+              <input type="password" name="clave" autocomplete="current-password" required>
+            </label>
+            <p class="error-formulario" id="error-entrar" role="alert"></p>
+            <button type="submit" class="boton boton-primario boton-grande">Entrar</button>
+          </form>
+        `}
+        <p class="entrar-pie">Uso interno de la institución.</p>
+      </section>
+    </main>
+  `;
+}
+
+// ——— Piezas compartidas ———
+
+function encabezadoVista({ sobretitulo, titulo, acciones = "", subtitulo = "" }) {
+  return `
+    <header class="encabezado-vista">
+      <div>
+        ${sobretitulo ? `<p class="sobretitulo">${sobretitulo}</p>` : ""}
+        <h1 class="titulo-vista">${titulo}</h1>
+        ${subtitulo ? `<p class="subtitulo-vista">${subtitulo}</p>` : ""}
+      </div>
+      ${acciones ? `<div class="encabezado-acciones">${acciones}</div>` : ""}
+    </header>
+  `;
+}
+
+function navegadorMes(mes, vista) {
+  const siguiente = D.mesSiguiente(mes);
+  const futuro = siguiente > D.hoyClave().slice(0, 7);
+  return `
+    <div class="navegador-mes" role="group" aria-label="Cambiar de mes">
+      <a class="boton-icono" href="#/${vista}/${D.mesAnterior(mes)}" aria-label="Mes anterior">${icono("izquierda")}</a>
+      <span class="navegador-mes-texto">${esc(D.mesHumano(mes))}</span>
+      ${futuro
+        ? `<span class="boton-icono deshabilitado" aria-hidden="true">${icono("derecha")}</span>`
+        : `<a class="boton-icono" href="#/${vista}/${siguiente}" aria-label="Mes siguiente">${icono("derecha")}</a>`}
+    </div>
+  `;
+}
+
+function anillo(porcentaje, { tamano = 96, grosor = 9 } = {}) {
+  const radio = (tamano - grosor) / 2;
+  const circunferencia = 2 * Math.PI * radio;
+  const valor = porcentaje == null ? 0 : porcentaje;
+  const nivel = A.nivelAsistencia(porcentaje);
+  return `
+    <svg class="anillo nivel-${nivel}" width="${tamano}" height="${tamano}" viewBox="0 0 ${tamano} ${tamano}" aria-hidden="true">
+      <circle cx="${tamano / 2}" cy="${tamano / 2}" r="${radio}" stroke-width="${grosor}" class="anillo-pista"/>
+      <circle cx="${tamano / 2}" cy="${tamano / 2}" r="${radio}" stroke-width="${grosor}" class="anillo-valor"
+        stroke-dasharray="${(circunferencia * valor) / 100} ${circunferencia}" transform="rotate(-90 ${tamano / 2} ${tamano / 2})"/>
+    </svg>
+  `;
+}
+
+function barraPorcentaje(porcentaje) {
+  const nivel = A.nivelAsistencia(porcentaje);
+  return `
+    <span class="barra-pct nivel-${nivel}">
+      <span class="barra-pct-texto">${porcentaje == null ? "—" : `${porcentaje} %`}</span>
+      <span class="barra-pct-pista"><span style="width:${porcentaje ?? 0}%"></span></span>
+    </span>
+  `;
+}
+
+function graficoNovedades(porDia, { compacto = false } = {}) {
+  if (!porDia.length) return `<p class="vacio-suave">Todavía no hay días de clase registrados este mes.</p>`;
+  const maximo = Math.max(2, ...porDia.map((dia) => dia.ausente + dia.excusa + dia.tarde));
+  const techo = maximo <= 4 ? 4 : maximo <= 6 ? 6 : maximo <= 8 ? 8 : Math.ceil(maximo / 5) * 5;
+  // Cada día ocupa al menos 26 px; con pocos días se reparten el ancho disponible.
+  const paso = Math.max(26, Math.min(64, Math.floor((compacto ? 300 : 700) / porDia.length)));
+  const alto = compacto ? 96 : 160;
+  const izquierda = 22;
+  const ancho = izquierda + porDia.length * paso;
+  const base = alto - 30;
+  const escala = (base - 14) / techo;
+  const lineas = [0, techo / 2, techo].map((valor) => {
+    const y = base - valor * escala;
+    return `<line x1="${izquierda}" x2="${ancho}" y1="${y}" y2="${y}" class="${valor === 0 ? "eje" : "rejilla"}"/><text x="${izquierda - 6}" y="${y + 3.5}" class="eje-texto" text-anchor="end">${valor}</text>`;
+  }).join("");
+  const barras = porDia.map((dia, indice) => {
+    const x = izquierda + indice * paso + (paso - 14) / 2;
+    let cima = base;
+    const partes = [["a", dia.ausente], ["e", dia.excusa], ["t", dia.tarde]].map(([clase, cantidad]) => {
+      if (!cantidad) return "";
+      const altura = cantidad * escala;
+      cima -= altura;
+      return `<rect x="${x}" y="${cima}" width="14" height="${altura}" rx="2" class="serie-${clase}"/>`;
+    }).join("");
+    const total = dia.ausente + dia.excusa + dia.tarde;
+    const etiqueta = `${A.diaCorto(dia.fecha)}: ${plural(dia.ausente, "ausente", "ausentes")}, ${plural(dia.excusa, "excusa", "excusas")}, ${plural(dia.tarde, "tarde", "tardes")} · asistencia ${dia.porcentaje ?? "—"} %`;
+    return `
+      <g class="grafico-dia">
+        <title>${esc(etiqueta)}</title>
+        <rect x="${x - (paso - 14) / 2}" y="0" width="${paso}" height="${base}" class="grafico-zona"/>
+        ${partes}
+        ${total && !compacto ? `<text x="${x + 7}" y="${cima - 4}" text-anchor="middle" class="grafico-total">${total}</text>` : ""}
+        <text x="${x + 7}" y="${base + 13}" text-anchor="middle" class="grafico-dia-num">${Number(dia.fecha.slice(8, 10))}</text>
+        <text x="${x + 7}" y="${base + 24}" text-anchor="middle" class="grafico-dia-letra">${A.inicialDia(dia.fecha)}</text>
+      </g>
+    `;
+  }).join("");
+  return `
+    <div class="grafico-desplazable">
+      <svg class="grafico" viewBox="0 0 ${ancho} ${alto}" width="${ancho}" height="${alto}" role="img" aria-label="Ausencias, excusas y llegadas tarde por día de clase">
+        ${lineas}${barras}
+      </svg>
+    </div>
+    <div class="leyenda">
+      <span><i class="punto serie-a"></i>Ausente</span>
+      <span><i class="punto serie-e"></i>Excusa</span>
+      <span><i class="punto serie-t"></i>Tarde</span>
+    </div>
+  `;
+}
+
+function fichaAlumno(estudiante, { tamano = "" } = {}) {
+  return `<span class="avatar ${tamano}" aria-hidden="true">${esc(A.iniciales(estudiante.nombre))}</span>`;
+}
+
+// ——— Vista: Hoy ———
+
+function vistaHoy() {
+  const hoy = D.hoyClave();
+  const mes = hoy.slice(0, 7);
+  const cache = estado.cache.get(mes);
+  const datos = datosMes(mes);
+  const dia = cache.dias.get(hoy);
+  const lista = activos();
+  const finDeSemana = A.esFinDeSemanaFecha(hoy);
+  const pendientes = A.diasPendientes(mes, cache.dias, hoy);
+
+  let tarjetaPase;
+  if (dia?.tipo === "sinClase") {
+    tarjetaPase = `
+      <div class="pase-estado">
+        <span class="pastilla pastilla-gris">${icono("sinClase", { tamano: 15 })}Sin clase</span>
+        <p class="pase-texto">Hoy está marcado sin clase${dia.motivo ? `: <strong>${esc(dia.motivo)}</strong>` : ""}. No genera faltas.</p>
+      </div>
+      <div class="pase-acciones">
+        <a class="boton boton-secundario" href="#/dia/${hoy}">Ver el día</a>
+      </div>
+    `;
+  } else if (dia) {
+    const contadores = D.contadoresDelDia(lista.map((estudiante) => cache.registros.get(D.claveRegistro(hoy, estudiante.mat)) || null));
+    const porcentaje = lista.length ? Math.round(((contadores.presente + contadores.tarde) / lista.length) * 100) : null;
+    tarjetaPase = `
+      <div class="pase-estado">
+        <span class="pastilla pastilla-verde">${icono("check", { tamano: 15 })}Pase registrado</span>
+        <div class="pase-cifras">
+          <span class="cifra cifra-p"><strong>${contadores.presente}</strong>presentes</span>
+          <span class="cifra cifra-a"><strong>${contadores.ausente}</strong>${contadores.ausente === 1 ? "ausente" : "ausentes"}</span>
+          <span class="cifra cifra-t"><strong>${contadores.tarde}</strong>${contadores.tarde === 1 ? "tarde" : "tardes"}</span>
+          <span class="cifra cifra-e"><strong>${contadores.excusa}</strong>${contadores.excusa === 1 ? "excusa" : "excusas"}</span>
+        </div>
+        <p class="pase-texto">Asistencia del día: <strong>${porcentaje ?? "—"} %</strong></p>
+      </div>
+      <div class="pase-acciones">
+        <a class="boton boton-primario" href="#/dia/${hoy}">${icono("editar", { tamano: 18 })}Revisar el pase</a>
+      </div>
+    `;
+  } else if (finDeSemana) {
+    tarjetaPase = `
+      <div class="pase-estado">
+        <span class="pastilla pastilla-gris">Fin de semana</span>
+        <p class="pase-texto">No hay clase programada. Si hubo una jornada especial, puedes pasar lista igualmente.</p>
+      </div>
+      <div class="pase-acciones">
+        <a class="boton boton-secundario" href="#/dia/${hoy}">Pasar lista de todos modos</a>
+      </div>
+    `;
+  } else {
+    tarjetaPase = `
+      <div class="pase-estado">
+        <span class="pastilla pastilla-ambar">${icono("reloj", { tamano: 15 })}Pendiente</span>
+        <p class="pase-texto">${plural(lista.length, "estudiante activo", "estudiantes activos")}. Todos arrancan como presentes: marca solo las novedades.</p>
+      </div>
+      <div class="pase-acciones">
+        <a class="boton boton-primario boton-grande" href="#/dia/${hoy}">${icono("checkDoble", { tamano: 20 })}Pasar lista</a>
+        <button type="button" class="boton boton-secundario" data-accion="todos-presentes" data-fecha="${hoy}">Registrar: todos presentes</button>
+      </div>
+    `;
+  }
+
+  const bloquePendientes = pendientes.length ? `
+    <section class="tarjeta tarjeta-pendientes">
+      <div class="tarjeta-encabezado">
+        <h2>${icono("reloj", { tamano: 18 })}Días sin registrar</h2>
+        <span class="contador-suave">${pendientes.length}</span>
+      </div>
+      <p class="tarjeta-nota">Días hábiles de ${esc(D.mesHumano(mes).split(" ")[0].toLowerCase())} sin pase ni marca de «sin clase».</p>
+      <div class="chips-dias">
+        ${pendientes.map((fecha) => `<a class="chip-dia" href="#/dia/${fecha}">${esc(A.diaCorto(fecha))}</a>`).join("")}
+      </div>
+    </section>
+  ` : "";
+
+  const conAlerta = datos.resumen.filas.filter((fila) => fila.alerta);
+  const atencion = `
+    <section class="tarjeta">
+      <div class="tarjeta-encabezado">
+        <h2>${icono("alerta", { tamano: 18 })}Requieren atención</h2>
+        ${conAlerta.length ? `<span class="contador-suave contador-rojo">${conAlerta.length}</span>` : ""}
+      </div>
+      ${conAlerta.length ? `
+        <ul class="lista-compacta">
+          ${conAlerta.map((fila) => `
+            <li>
+              <button type="button" class="fila-boton" data-accion="ver-estudiante" data-mat="${fila.mat}" data-mes="${mes}">
+                ${fichaAlumno(fila)}
+                <span class="fila-texto">
+                  <strong>${esc(A.nombreVisible(fila.nombre))}</strong>
+                  <small class="texto-rojo">${esc(D.textoAlerta(fila.alerta))}</small>
+                </span>
+                ${icono("derecha", { tamano: 18, clase: "fila-flecha" })}
+              </button>
+            </li>
+          `).join("")}
+        </ul>
+      ` : `<p class="vacio-suave">Nadie alcanza los umbrales de alerta este mes (${umbrales().umbralSeguidas} faltas seguidas o ${umbrales().umbralAcumuladas} en el mes).</p>`}
+    </section>
+  `;
+
+  const recientes = [...datos.observaciones].filter((obs) => obs.mat != null).reverse().slice(0, 4);
+  const observaciones = `
+    <section class="tarjeta">
+      <div class="tarjeta-encabezado">
+        <h2>${icono("comentario", { tamano: 18 })}Observaciones recientes</h2>
+      </div>
+      ${recientes.length ? `
+        <ul class="lista-observaciones">
+          ${recientes.map((obs) => `
+            <li>
+              <a href="#/dia/${obs.fecha}" class="observacion">
+                <span class="observacion-fecha">${esc(A.diaCorto(obs.fecha))}</span>
+                <span class="observacion-cuerpo">
+                  <strong>${esc(A.nombreVisible(obs.nombre))}</strong>
+                  ${obs.estado && obs.estado !== D.PRESENTE ? `<span class="etiqueta-estado e-${LETRA[obs.estado]}">${esc(obs.estado)}</span>` : ""}
+                  <span class="observacion-texto">${esc(obs.comentario || obs.etiquetas.join(", "))}</span>
+                </span>
+              </a>
+            </li>
+          `).join("")}
+        </ul>
+      ` : `<p class="vacio-suave">Sin observaciones este mes.</p>`}
+    </section>
+  `;
+
+  const estadisticas = datos.estadisticas;
+  const mesEnCurso = `
+    <section class="tarjeta tarjeta-mes">
+      <div class="tarjeta-encabezado">
+        <h2>${icono("resumen", { tamano: 18 })}${esc(D.mesHumano(mes))}</h2>
+        <a class="enlace" href="#/resumen/${mes}">Ver resumen ${icono("derecha", { tamano: 16 })}</a>
+      </div>
+      <div class="mes-cifras">
+        <div class="mes-anillo">
+          ${anillo(estadisticas.porcentajeCurso, { tamano: 84, grosor: 8 })}
+          <span class="mes-anillo-valor">${estadisticas.porcentajeCurso ?? "—"}<small>%</small></span>
+        </div>
+        <dl class="mini-datos">
+          <div><dt>Días de clase</dt><dd>${estadisticas.dias}</dd></div>
+          <div><dt>Faltas</dt><dd class="texto-rojo">${estadisticas.totales.ausente}</dd></div>
+          <div><dt>Excusas</dt><dd class="texto-violeta">${estadisticas.totales.excusa}</dd></div>
+          <div><dt>Tardes</dt><dd class="texto-ambar">${estadisticas.totales.tarde}</dd></div>
+        </dl>
+      </div>
+      ${datos.porDia.length ? graficoNovedades(datos.porDia, { compacto: true }) : ""}
+    </section>
+  `;
+
+  return `
+    <section class="vista vista-hoy">
+      ${encabezadoVista({
+        sobretitulo: `${A.saludo()} · Curso ${esc(estado.curso.nombre)}`,
+        titulo: esc(A.fechaTitulo(hoy)),
+      })}
+      <section class="tarjeta tarjeta-pase${dia ? "" : " destacada"}">
+        <h2 class="visualmente-oculto">Pase de hoy</h2>
+        ${tarjetaPase}
+      </section>
+      ${bloquePendientes}
+      <div class="rejilla-dos">
+        ${mesEnCurso}
+        ${atencion}
+      </div>
+      ${observaciones}
+    </section>
+  `;
+}
+
+// ——— Vista: Calendario ———
+
+function vistaCalendario(mes) {
+  const cache = estado.cache.get(mes);
+  const hoy = D.hoyClave();
+  const datos = datosMes(mes);
+  const porFecha = new Map(datos.porDia.map((dia) => [dia.fecha, dia]));
+  const total = D.diasEnMes(mes);
+  const desplazamiento = D.primerDiaSemana(mes);
+  const pendientes = new Set(A.diasPendientes(mes, cache.dias, hoy));
+
+  let celdas = "";
+  for (let i = 0; i < desplazamiento; i++) celdas += `<span class="cal-vacia" aria-hidden="true"></span>`;
+  for (let numero = 1; numero <= total; numero++) {
+    const fecha = D.claveDelDia(mes, numero);
+    const futuro = fecha > hoy;
+    const finde = D.esFinDeSemana(mes, numero);
+    const dia = cache.dias.get(fecha);
+    const clases = ["cal-dia"];
+    let detalle = "";
+    let descripcion = "";
+    if (dia?.tipo === "sinClase") {
+      clases.push("cal-sin-clase");
+      detalle = `<span class="cal-motivo">${esc(dia.motivo || "Sin clase")}</span>`;
+      descripcion = `sin clase${dia.motivo ? `: ${dia.motivo}` : ""}`;
+    } else if (dia) {
+      const resumenDia = porFecha.get(fecha);
+      const nivel = A.nivelAsistencia(resumenDia?.porcentaje);
+      clases.push("cal-registrado", `nivel-${nivel}`);
+      const novedades = resumenDia ? resumenDia.ausente : 0;
+      detalle = `
+        <span class="cal-pct">${resumenDia?.porcentaje ?? "—"}<small>%</small></span>
+        <span class="cal-barra"><span style="width:${resumenDia?.porcentaje ?? 0}%"></span></span>
+        ${novedades ? `<span class="cal-faltas" title="${plural(novedades, "ausente", "ausentes")}">${novedades}</span>` : ""}
+      `;
+      descripcion = `registrado, asistencia ${resumenDia?.porcentaje ?? "—"} %`;
+    } else if (pendientes.has(fecha)) {
+      clases.push("cal-pendiente");
+      detalle = `<span class="cal-etiqueta">Pendiente</span>`;
+      descripcion = "pendiente";
+    } else if (fecha === hoy && !finde) {
+      detalle = `<span class="cal-etiqueta">Hoy</span>`;
+      descripcion = "sin registrar";
+    }
+    if (finde) clases.push("cal-finde");
+    if (fecha === hoy) clases.push("cal-hoy");
+    if (futuro) clases.push("cal-futuro");
+    const etiqueta = `${capitalizar(D.fechaHumana(fecha))}${descripcion ? `, ${descripcion}` : ""}`;
+    celdas += futuro
+      ? `<span class="${clases.join(" ")}" aria-label="${esc(etiqueta)}"><span class="cal-numero">${numero}</span></span>`
+      : `<a class="${clases.join(" ")}" href="#/dia/${fecha}" aria-label="${esc(etiqueta)}" ${fecha === hoy ? 'aria-current="date"' : ""}><span class="cal-numero">${numero}</span>${detalle}</a>`;
+  }
+
+  const sinClase = datos.sinClase;
+  return `
+    <section class="vista vista-calendario">
+      ${encabezadoVista({
+        sobretitulo: `Calendario · Curso ${esc(estado.curso.nombre)}`,
+        titulo: "Días del mes",
+        acciones: navegadorMes(mes, "calendario"),
+      })}
+      <section class="tarjeta tarjeta-calendario">
+        <div class="calendario" role="grid" aria-label="Calendario de ${esc(D.mesHumano(mes))}">
+          ${["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"].map((nombre) => `<span class="cal-semana" role="columnheader">${nombre}</span>`).join("")}
+          ${celdas}
+        </div>
+        <div class="leyenda leyenda-calendario">
+          <span><i class="punto punto-alto"></i>Registrado</span>
+          <span><i class="punto punto-pendiente"></i>Pendiente</span>
+          <span><i class="punto punto-sin-clase"></i>Sin clase</span>
+          <span><i class="punto punto-hoy"></i>Hoy</span>
+        </div>
+      </section>
+      <div class="rejilla-dos">
+        <section class="tarjeta">
+          <div class="tarjeta-encabezado"><h2>${icono("resumen", { tamano: 18 })}En cifras</h2></div>
+          <dl class="mini-datos mini-datos-fila">
+            <div><dt>Días de clase</dt><dd>${datos.estadisticas.dias}</dd></div>
+            <div><dt>Pendientes</dt><dd class="${pendientes.size ? "texto-ambar" : ""}">${pendientes.size}</dd></div>
+            <div><dt>Sin clase</dt><dd>${sinClase.length}</dd></div>
+            <div><dt>Asistencia</dt><dd>${datos.estadisticas.porcentajeCurso ?? "—"}<small> %</small></dd></div>
+          </dl>
+          <a class="enlace" href="#/resumen/${mes}">Ver el resumen del mes ${icono("derecha", { tamano: 16 })}</a>
+        </section>
+        <section class="tarjeta">
+          <div class="tarjeta-encabezado"><h2>${icono("sinClase", { tamano: 18 })}Días sin clase</h2></div>
+          ${sinClase.length ? `
+            <ul class="lista-simple">
+              ${sinClase.map((dia) => `<li><a href="#/dia/${dia.fecha}"><strong>${esc(A.diaCorto(dia.fecha))}</strong><span>${esc(dia.motivo || "Sin motivo registrado")}</span></a></li>`).join("")}
+            </ul>
+          ` : `<p class="vacio-suave">Ninguno marcado este mes.</p>`}
+        </section>
+      </div>
+    </section>
+  `;
+}
+
+// ——— Vista: Pase del día ———
+
+function vistaDia(fecha) {
+  const cache = estado.cache.get(fecha.slice(0, 7));
+  const dia = cache.dias.get(fecha) || null;
+  const sinClase = dia?.tipo === "sinClase";
+  const lista = activos();
+  const hoy = D.hoyClave();
+  const anterior = A.sumarDias(fecha, -1);
+  const siguiente = A.sumarDias(fecha, 1);
+  const registrosDe = (estudiante) => cache.registros.get(D.claveRegistro(fecha, estudiante.mat)) || null;
+  const contadores = D.contadoresDelDia(lista.map(registrosDe));
+  const porcentaje = lista.length ? Math.round(((contadores.presente + contadores.tarde) / lista.length) * 100) : null;
+
+  let estadoDia;
+  if (sinClase) estadoDia = `<span class="pastilla pastilla-gris">${icono("sinClase", { tamano: 15 })}Sin clase</span>`;
+  else if (dia) estadoDia = `<span class="pastilla pastilla-verde">${icono("check", { tamano: 15 })}Registrado</span>`;
+  else estadoDia = `<span class="pastilla pastilla-ambar">${icono("reloj", { tamano: 15 })}Sin registrar</span>`;
+
+  const navegacion = `
+    <div class="navegador-mes" role="group" aria-label="Cambiar de día">
+      <a class="boton-icono" href="#/dia/${anterior}" aria-label="Día anterior">${icono("izquierda")}</a>
+      <a class="boton-icono boton-texto" href="#/calendario/${fecha.slice(0, 7)}">${icono("calendario", { tamano: 18 })}<span>Mes</span></a>
+      ${siguiente > hoy
+        ? `<span class="boton-icono deshabilitado" aria-hidden="true">${icono("derecha")}</span>`
+        : `<a class="boton-icono" href="#/dia/${siguiente}" aria-label="Día siguiente">${icono("derecha")}</a>`}
+    </div>
+  `;
+
+  const encabezado = encabezadoVista({
+    sobretitulo: `Pase de lista · Curso ${esc(estado.curso.nombre)}`,
+    titulo: `${esc(A.fechaTitulo(fecha))}${fecha.slice(0, 4) !== hoy.slice(0, 4) ? ` de ${fecha.slice(0, 4)}` : ""}`,
+    subtitulo: `${estadoDia}${fecha === hoy ? '<span class="pastilla pastilla-marca">Hoy</span>' : ""}${A.esFinDeSemanaFecha(fecha) ? '<span class="pastilla pastilla-gris">Fin de semana</span>' : ""}`,
+    acciones: navegacion,
+  });
+
+  if (sinClase) {
+    return `
+      <section class="vista vista-dia">
+        ${encabezado}
+        <section class="tarjeta tarjeta-sin-clase">
+          <div class="sin-clase-icono">${icono("sinClase", { tamano: 28 })}</div>
+          <div>
+            <h2>Día sin clase</h2>
+            <p>Motivo: <strong>${esc(dia.motivo || "sin especificar")}</strong>. Este día no genera faltas ni cuenta en el resumen.</p>
+            ${dia.nota ? `<p class="nota-dia-texto">${icono("nota", { tamano: 16 })}${esc(dia.nota)}</p>` : ""}
+          </div>
+          <div class="sin-clase-acciones">
+            <button type="button" class="boton boton-secundario" data-accion="abrir-sin-clase" data-fecha="${fecha}">${icono("editar", { tamano: 18 })}Cambiar motivo</button>
+            <button type="button" class="boton boton-primario" data-accion="volver-clase" data-fecha="${fecha}">${icono("checkDoble", { tamano: 18 })}Sí hubo clase</button>
+          </div>
+        </section>
+      </section>
+    `;
+  }
+
+  const filtros = [D.PRESENTE, D.AUSENTE, D.TARDE, D.EXCUSA].map((opcion) => {
+    const cantidad = contadores[{ [D.PRESENTE]: "presente", [D.AUSENTE]: "ausente", [D.TARDE]: "tarde", [D.EXCUSA]: "excusa" }[opcion]];
+    const activo = estado.filtro === opcion;
+    return `
+      <button type="button" class="contador contador-${LETRA[opcion]}${activo ? " activo" : ""}" data-accion="filtrar" data-estado="${opcion}" aria-pressed="${activo}">
+        <strong>${cantidad}</strong><span>${cantidad === 1 ? PLURAL[opcion][0] : PLURAL[opcion][1]}</span>
+      </button>
+    `;
+  }).join("");
+
+  let visibles = A.filtrarPorTexto(lista, estado.busqueda);
+  if (estado.filtro) visibles = visibles.filter((estudiante) => D.estadoDe(registrosDe(estudiante)) === estado.filtro);
+  const filas = visibles.map((estudiante) => filaPase(fecha, estudiante, registrosDe(estudiante))).join("");
+
+  return `
+    <section class="vista vista-dia">
+      ${encabezado}
+      <section class="tarjeta tarjeta-resumen-dia">
+        <div class="contadores" role="group" aria-label="Filtrar por estado">${filtros}</div>
+        <div class="resumen-dia-pie">
+          <span class="resumen-dia-pct">Asistencia del día <strong>${porcentaje ?? "—"} %</strong></span>
+          <div class="acciones-dia">
+            <button type="button" class="boton ${dia ? "boton-secundario" : "boton-primario"} boton-chico" data-accion="todos-presentes" data-fecha="${fecha}">${icono("checkDoble", { tamano: 17 })}Todos presentes</button>
+            <button type="button" class="boton boton-secundario boton-chico" data-accion="abrir-nota-dia" data-fecha="${fecha}">${icono("nota", { tamano: 17 })}${dia?.nota ? "Nota del día" : "Agregar nota"}</button>
+            <button type="button" class="boton boton-secundario boton-chico" data-accion="abrir-sin-clase" data-fecha="${fecha}">${icono("sinClase", { tamano: 17 })}Sin clase</button>
+          </div>
+        </div>
+        ${dia?.nota ? `<button type="button" class="nota-dia-texto" data-accion="abrir-nota-dia" data-fecha="${fecha}">${icono("nota", { tamano: 16 })}<span>${esc(dia.nota)}</span></button>` : ""}
+      </section>
+
+      <div class="barra-busqueda">
+        <label class="buscador">
+          ${icono("buscar", { tamano: 18 })}
+          <input type="search" placeholder="Buscar estudiante" value="${esc(estado.busqueda)}" data-campo="busqueda" data-foco="busqueda-dia" aria-label="Buscar estudiante" autocomplete="off">
+        </label>
+        ${estado.filtro ? `<button type="button" class="boton boton-fantasma boton-chico" data-accion="filtrar" data-estado="${estado.filtro}">${icono("cerrar", { tamano: 16 })}Quitar filtro</button>` : ""}
+      </div>
+
+      <ul class="lista-pase" aria-label="Estudiantes">
+        ${filas || `<li class="vacio-suave">${lista.length ? "Ningún estudiante coincide con la búsqueda o el filtro." : "La lista está vacía. Agrega estudiantes en la pestaña Estudiantes."}</li>`}
+      </ul>
+      <p class="ayuda">Todos arrancan como <strong>presentes</strong>: marca solo las novedades. Cada cambio se guarda solo y puedes deshacerlo desde el aviso.</p>
+    </section>
+  `;
+}
+
+function filaPase(fecha, estudiante, registro) {
+  const actual = D.estadoDe(registro);
+  const nombre = A.nombreVisible(estudiante.nombre);
+  const opciones = D.ESTADOS.map((opcion) => {
+    const marcada = opcion === actual;
+    return `
+      <button type="button" class="op op-${LETRA[opcion]}${marcada ? " marcada" : ""}" role="radio" aria-checked="${marcada}"
+        data-accion="estado" data-fecha="${fecha}" data-mat="${estudiante.mat}" data-estado="${opcion}"
+        aria-label="${opcion}" title="${opcion}">
+        <span class="op-letra">${D.letraEstado(opcion)}</span><span class="op-nombre">${opcion}</span>
+      </button>
+    `;
+  }).join("");
+  const conObservacion = A.tieneObservacion(registro);
+  const detalle = [];
+  if (estudiante.notaPersistente) detalle.push(`<span class="marca-persistente" title="${esc(estudiante.notaPersistente)}">${esc(estudiante.notaPersistente)}</span>`);
+  if (conObservacion) {
+    detalle.push(`<span class="marca-observacion">${icono("comentario", { tamano: 13 })}${esc([...(registro.etiquetas || []), registro.comentario].filter(Boolean).join(" · "))}</span>`);
+  }
+  return `
+    <li class="alumno estado-${LETRA[actual]}">
+      <div class="alumno-id">
+        <span class="alumno-no">${esc(estudiante.no)}</span>
+        <div class="alumno-texto">
+          <span class="alumno-nombre">${esc(nombre)}</span>
+          ${detalle.length ? `<span class="alumno-detalle">${detalle.join("")}</span>` : ""}
+        </div>
+      </div>
+      <div class="alumno-controles">
+        <div class="selector-estado" role="radiogroup" aria-label="Estado de ${esc(nombre)}">${opciones}</div>
+        <button type="button" class="boton-observacion${conObservacion ? " con-observacion" : ""}" data-accion="abrir-observacion" data-fecha="${fecha}" data-mat="${estudiante.mat}" aria-label="Observación de ${esc(nombre)}">
+          ${icono("comentario", { tamano: 19 })}
+        </button>
+      </div>
+    </li>
+  `;
+}
+
+// ——— Vista: Resumen ———
+
+function vistaResumen(mes) {
+  const datos = datosMes(mes);
+  const { resumen, estadisticas } = datos;
+  const lista = A.filtrarPorTexto(resumen.filas, estado.busqueda);
+  const ordenadas = [...lista].sort((a, b) => {
+    if (estado.orden === "faltas") return b.ausente - a.ausente || Number(a.no) - Number(b.no);
+    if (estado.orden === "porcentaje") return (a.porcentaje ?? 101) - (b.porcentaje ?? 101) || Number(a.no) - Number(b.no);
+    return Number(a.no) - Number(b.no);
+  });
+  const limites = umbrales();
+
+  const filas = ordenadas.map((fila) => `
+    <tr class="${fila.alerta ? "con-alerta" : ""}" data-accion="ver-estudiante" data-mat="${fila.mat}" data-mes="${mes}" tabindex="0">
+      <td class="col-no">${esc(fila.no)}</td>
+      <td class="col-nombre">
+        <span class="celda-nombre">${esc(A.nombreVisible(fila.nombre))}</span>
+        ${fila.alerta ? `<span class="insignia-alerta">${icono("alerta", { tamano: 13 })}${esc(D.textoAlerta(fila.alerta))}</span>` : ""}
+        <span class="celda-movil">P ${fila.presente} · T ${fila.tarde} · E ${fila.excusa}</span>
+      </td>
+      <td class="col-num ocultar-movil">${fila.presente}</td>
+      <td class="col-num ocultar-movil">${fila.tarde}</td>
+      <td class="col-num ocultar-movil">${fila.excusa}</td>
+      <td class="col-num col-faltas${fila.ausente ? " texto-rojo" : ""}">${fila.ausente}</td>
+      <td class="col-pct">${barraPorcentaje(fila.porcentaje)}</td>
+    </tr>
+  `).join("");
+
+  const ordenBoton = (clave, texto) => `<button type="button" class="segmento${estado.orden === clave ? " activo" : ""}" data-accion="ordenar" data-orden="${clave}" aria-pressed="${estado.orden === clave}">${texto}</button>`;
+  const generando = estado.generando;
+
+  return `
+    <section class="vista vista-resumen">
+      ${encabezadoVista({
+        sobretitulo: `Resumen mensual · Curso ${esc(estado.curso.nombre)}`,
+        titulo: esc(D.mesHumano(mes)),
+        acciones: navegadorMes(mes, "resumen"),
+      })}
+
+      <section class="tarjeta tarjeta-kpi">
+        <div class="kpi-principal">
+          <div class="mes-anillo grande">
+            ${anillo(estadisticas.porcentajeCurso, { tamano: 120, grosor: 11 })}
+            <span class="mes-anillo-valor">${estadisticas.porcentajeCurso ?? "—"}<small>%</small></span>
+          </div>
+          <div>
+            <p class="kpi-titulo">Asistencia del curso</p>
+            <p class="kpi-texto">${plural(estadisticas.dias, "día de clase", "días de clase")} · ${plural(estadisticas.activos, "estudiante activo", "estudiantes activos")}</p>
+          </div>
+        </div>
+        <dl class="kpis">
+          <div class="kpi kpi-a"><dt>Faltas (Inas.)</dt><dd>${estadisticas.totales.ausente}</dd><span>Promedio ${String(estadisticas.promedioFaltas ?? 0).replace(".", ",")} por estudiante</span></div>
+          <div class="kpi kpi-e"><dt>Excusas</dt><dd>${estadisticas.totales.excusa}</dd><span>Faltas justificadas</span></div>
+          <div class="kpi kpi-t"><dt>Tardes</dt><dd>${estadisticas.totales.tarde}</dd><span>Cuentan como asistencia</span></div>
+          <div class="kpi ${estadisticas.conAlerta ? "kpi-a" : "kpi-p"}"><dt>Con alerta</dt><dd>${estadisticas.conAlerta}</dd><span>${plural(estadisticas.sinFaltas, "sin ninguna falta", "sin ninguna falta")}</span></div>
+        </dl>
+      </section>
+
+      <section class="tarjeta">
+        <div class="tarjeta-encabezado"><h2>${icono("resumen", { tamano: 18 })}Novedades por día de clase</h2></div>
+        ${graficoNovedades(datos.porDia)}
+      </section>
+
+      <section class="tarjeta tarjeta-exportar">
+        <div class="tarjeta-encabezado"><h2>${icono("descargar", { tamano: 18 })}Documentos del mes</h2></div>
+        <div class="exportes">
+          <div class="exporte exporte-destacado">
+            <span class="exporte-icono">${icono("pdf", { tamano: 26 })}</span>
+            <div class="exporte-texto">
+              <strong>Informe PDF</strong>
+              <span>A4 horizontal con membrete: panorama del mes, tabla por estudiante, detalle por día y firmas.</span>
+              <label class="interruptor">
+                <input type="checkbox" data-campo="incluir-observaciones" ${estado.incluirObservaciones ? "checked" : ""}>
+                <span class="interruptor-pista"></span>
+                <span>Incluir observaciones</span>
+              </label>
+            </div>
+            <div class="exporte-acciones">
+              <button type="button" class="boton boton-primario" data-accion="pdf" data-mes="${mes}" ${generando ? "disabled" : ""}>${generando === "pdf" ? "Preparando…" : `${icono("descargar", { tamano: 18 })}Descargar`}</button>
+              ${esTactil() ? "" : `<button type="button" class="boton boton-secundario" data-accion="pdf-abrir" data-mes="${mes}" ${generando ? "disabled" : ""}>${icono("imprimir", { tamano: 18 })}Abrir</button>`}
+            </div>
+          </div>
+          <div class="exporte">
+            <span class="exporte-icono exporte-icono-verde">${icono("tabla", { tamano: 26 })}</span>
+            <div class="exporte-texto">
+              <strong>Libro de Excel</strong>
+              <span>Cinco hojas con formato: resumen, detalle por día, estadísticas, observaciones y lista.</span>
+            </div>
+            <div class="exporte-acciones">
+              <button type="button" class="boton boton-secundario" data-accion="excel" data-mes="${mes}" ${generando ? "disabled" : ""}>${generando === "excel" ? "Preparando…" : `${icono("descargar", { tamano: 18 })}Descargar`}</button>
+            </div>
+          </div>
+          <div class="exporte">
+            <span class="exporte-icono exporte-icono-gris">${icono("nota", { tamano: 26 })}</span>
+            <div class="exporte-texto">
+              <strong>CSV para planillas</strong>
+              <span>Mismo formato de siempre (separador «;»), con la columna «Inas.».</span>
+            </div>
+            <div class="exporte-acciones">
+              <button type="button" class="boton boton-secundario boton-chico" data-accion="csv-resumen" data-mes="${mes}">Resumen</button>
+              <button type="button" class="boton boton-secundario boton-chico" data-accion="csv-detalle" data-mes="${mes}">Detalle</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tarjeta tarjeta-tabla">
+        <div class="tarjeta-encabezado tarjeta-encabezado-tabla">
+          <h2>${icono("estudiantes", { tamano: 18 })}Por estudiante</h2>
+          <div class="controles-tabla">
+            <label class="buscador buscador-chico">
+              ${icono("buscar", { tamano: 16 })}
+              <input type="search" placeholder="Buscar" value="${esc(estado.busqueda)}" data-campo="busqueda" data-foco="busqueda-resumen" aria-label="Buscar estudiante" autocomplete="off">
+            </label>
+            <div class="segmentos" role="group" aria-label="Ordenar">
+              ${ordenBoton("no", "No.")}${ordenBoton("faltas", "Faltas")}${ordenBoton("porcentaje", "%")}
+            </div>
+          </div>
+        </div>
+        <div class="tabla-contenedor">
+          <table class="tabla">
+            <thead>
+              <tr>
+                <th class="col-no" scope="col">No.</th>
+                <th class="col-nombre" scope="col">Estudiante</th>
+                <th class="col-num ocultar-movil" scope="col" title="Presente">P</th>
+                <th class="col-num ocultar-movil" scope="col" title="Tarde">T</th>
+                <th class="col-num ocultar-movil" scope="col" title="Excusa">E</th>
+                <th class="col-num" scope="col" title="Ausente (Inas.)">A</th>
+                <th class="col-pct" scope="col">Asistencia</th>
+              </tr>
+            </thead>
+            <tbody>${filas || `<tr><td colspan="7" class="vacio-suave">Ningún estudiante coincide con la búsqueda.</td></tr>`}</tbody>
+            <tfoot>
+              <tr>
+                <td></td>
+                <td class="col-nombre">Total del curso<span class="celda-movil">P ${resumen.totales.presente} · T ${resumen.totales.tarde} · E ${resumen.totales.excusa}</span></td>
+                <td class="col-num ocultar-movil">${resumen.totales.presente}</td>
+                <td class="col-num ocultar-movil">${resumen.totales.tarde}</td>
+                <td class="col-num ocultar-movil">${resumen.totales.excusa}</td>
+                <td class="col-num texto-rojo">${resumen.totales.ausente}</td>
+                <td class="col-pct">${barraPorcentaje(estadisticas.porcentajeCurso)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <p class="ayuda">% = (Presente + Tarde) ÷ días de clase. Alerta: ${limites.umbralSeguidas} o más faltas seguidas, o ${limites.umbralAcumuladas} o más en el mes. Toca un estudiante para ver su mes.</p>
+      </section>
+    </section>
+  `;
+}
+
+// ——— Vista: Estudiantes ———
+
+function vistaEstudiantes() {
+  const lista = activos();
+  const retiradas = estado.estudiantes.filter((estudiante) => estudiante.estado === "retirada");
+  const visibles = A.filtrarPorTexto(lista, estado.busqueda);
+  const fila = (estudiante) => `
+    <li>
+      <button type="button" class="fila-boton" data-accion="editar-estudiante" data-mat="${estudiante.mat}">
+        <span class="alumno-no">${esc(estudiante.no)}</span>
+        <span class="fila-texto">
+          <strong>${esc(A.nombreVisible(estudiante.nombre))}</strong>
+          <small>Mat. ${esc(estudiante.mat)}${estudiante.notaPersistente ? ` · <span class="texto-marca">${esc(estudiante.notaPersistente)}</span>` : ""}</small>
+        </span>
+        ${icono("editar", { tamano: 18, clase: "fila-flecha" })}
+      </button>
+    </li>
+  `;
+  return `
+    <section class="vista vista-estudiantes">
+      ${encabezadoVista({
+        sobretitulo: `Curso ${esc(estado.curso.nombre)}`,
+        titulo: "Estudiantes",
+        subtitulo: `${plural(lista.length, "activo", "activos")}${retiradas.length ? ` · ${plural(retiradas.length, "retirada", "retiradas")}` : ""}`,
+        acciones: `<button type="button" class="boton boton-primario" data-accion="nuevo-estudiante">${icono("mas", { tamano: 18 })}Agregar</button>`,
+      })}
+      <div class="rejilla-lateral">
+        <section class="tarjeta tarjeta-lista">
+          <label class="buscador">
+            ${icono("buscar", { tamano: 18 })}
+            <input type="search" placeholder="Buscar por nombre, No. o Mat." value="${esc(estado.busqueda)}" data-campo="busqueda" data-foco="busqueda-estudiantes" aria-label="Buscar estudiante" autocomplete="off">
+          </label>
+          <ul class="lista-compacta lista-estudiantes">
+            ${visibles.map(fila).join("") || `<li class="vacio-suave">${lista.length ? "Nadie coincide con la búsqueda." : "Todavía no hay estudiantes. Agrégalos uno a uno o importa la lista base."}</li>`}
+          </ul>
+          ${retiradas.length ? `
+            <details class="plegable">
+              <summary>${icono("abajo", { tamano: 16 })}Retiradas (${retiradas.length})</summary>
+              <ul class="lista-compacta lista-estudiantes retiradas">${retiradas.map(fila).join("")}</ul>
+            </details>
+          ` : ""}
+        </section>
+        <div class="columna-lateral">
+          <section class="tarjeta">
+            <div class="tarjeta-encabezado"><h2>${icono("respaldo", { tamano: 18 })}Datos y respaldo</h2></div>
+            <div class="lista-acciones">
+              <button type="button" class="accion" data-accion="csv-lista">${icono("descargar", { tamano: 18 })}<span><strong>Exportar lista</strong><small>CSV para planillas</small></span></button>
+              <button type="button" class="accion" data-accion="respaldo">${icono("respaldo", { tamano: 18 })}<span><strong>Descargar respaldo</strong><small>Todo el histórico en JSON</small></span></button>
+              <button type="button" class="accion" data-accion="restaurar">${icono("subir", { tamano: 18 })}<span><strong>Restaurar respaldo</strong><small>Vuelve a subir un JSON de respaldo</small></span></button>
+              <button type="button" class="accion" data-accion="importar-lista">${icono("estudiantes", { tamano: 18 })}<span><strong>Importar lista base</strong><small>Agrega o actualiza por Mat. No.</small></span></button>
+            </div>
+            <input type="file" accept=".json,application/json" hidden data-rol="archivo-lista">
+            <input type="file" accept=".json,application/json" hidden data-rol="archivo-respaldo">
+          </section>
+          <section class="tarjeta">
+            <div class="tarjeta-encabezado"><h2>${icono("escuela", { tamano: 18 })}Cuenta</h2></div>
+            <p class="tarjeta-nota">Sesión: <strong>${esc(estado.usuario?.email || "")}</strong></p>
+            <div class="lista-acciones">
+              ${estado.modo === "demo" ? `<button type="button" class="accion" data-accion="reiniciar-demo">${icono("reiniciar", { tamano: 18 })}<span><strong>Reiniciar la demo</strong><small>Vuelve a los datos ficticios iniciales</small></span></button>` : ""}
+              <a class="accion" href="clasica/${estado.modo === "demo" ? "?demo=1" : ""}">${icono("izquierda", { tamano: 18 })}<span><strong>Versión clásica</strong><small>La app anterior, con los mismos datos</small></span></a>
+              <button type="button" class="accion accion-peligro" data-accion="salir">${icono("salir", { tamano: 18 })}<span><strong>Cerrar sesión</strong></span></button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+// ——— Hojas (paneles emergentes) ———
+
+function hojaHtml() {
+  const hoja = estado.hoja;
+  if (!hoja) return "";
+  let contenido = "";
+  if (hoja.tipo === "observacion") contenido = hojaObservacion(hoja);
+  else if (hoja.tipo === "nota-dia") contenido = hojaNotaDia(hoja);
+  else if (hoja.tipo === "sin-clase") contenido = hojaSinClase(hoja);
+  else if (hoja.tipo === "estudiante") contenido = hojaEstudiante(hoja);
+  else if (hoja.tipo === "form-estudiante") contenido = hojaFormEstudiante(hoja);
+  else if (hoja.tipo === "cursos") contenido = hojaCursos();
+  else if (hoja.tipo === "confirmar") contenido = hojaConfirmar(hoja);
+  return `
+    <div class="velo" data-accion="cerrar-hoja"></div>
+    <div class="hoja" role="dialog" aria-modal="true" aria-labelledby="titulo-hoja">
+      <div class="hoja-asa" aria-hidden="true"></div>
+      ${contenido}
+    </div>
+  `;
+}
+
+function cabeceraHoja(titulo, subtitulo = "") {
+  return `
+    <header class="hoja-cabecera">
+      <div>
+        <h2 id="titulo-hoja">${titulo}</h2>
+        ${subtitulo ? `<p>${subtitulo}</p>` : ""}
+      </div>
+      <button type="button" class="boton-icono" data-accion="cerrar-hoja" aria-label="Cerrar">${icono("cerrar")}</button>
+    </header>
+  `;
+}
+
+function hojaObservacion({ fecha, mat }) {
+  const cache = estado.cache.get(fecha.slice(0, 7));
+  const registro = cache?.registros.get(D.claveRegistro(fecha, mat)) || null;
+  const estudiante = estado.estudiantes.find((otro) => Number(otro.mat) === Number(mat));
+  const actual = D.estadoDe(registro);
+  const etiquetas = D.ETIQUETAS_RAPIDAS.map((etiqueta) => {
+    const puesta = estado.etiquetasBorrador.includes(etiqueta);
+    return `<button type="button" class="chip${puesta ? " puesta" : ""}" data-accion="etiqueta" data-etiqueta="${esc(etiqueta)}" aria-pressed="${puesta}">${esc(etiqueta)}</button>`;
+  }).join("");
+  return `
+    ${cabeceraHoja(esc(A.nombreVisible(estudiante?.nombre || "")), `${esc(capitalizar(D.fechaHumana(fecha)))} · <span class="etiqueta-estado e-${LETRA[actual]}">${esc(actual)}</span>`)}
+    <div class="hoja-cuerpo">
+      ${estudiante?.notaPersistente ? `<p class="nota-persistente">${icono("info", { tamano: 16 })}${esc(estudiante.notaPersistente)}</p>` : ""}
+      <label class="campo">
+        <span>Observación del día</span>
+        <textarea rows="3" data-rol="comentario" data-autofoco placeholder="Ej.: llegó a la segunda hora con excusa firmada">${esc(registro?.comentario || "")}</textarea>
+      </label>
+      <div class="campo">
+        <span>Etiquetas rápidas</span>
+        <div class="chips">${etiquetas}</div>
+      </div>
+    </div>
+    <footer class="hoja-pie">
+      ${A.tieneObservacion(registro) ? `<button type="button" class="boton boton-fantasma texto-rojo" data-accion="quitar-observacion" data-fecha="${fecha}" data-mat="${mat}">Quitar</button>` : "<span></span>"}
+      <button type="button" class="boton boton-primario" data-accion="guardar-observacion" data-fecha="${fecha}" data-mat="${mat}">Guardar</button>
+    </footer>
+  `;
+}
+
+function hojaNotaDia({ fecha }) {
+  const dia = estado.cache.get(fecha.slice(0, 7))?.dias.get(fecha);
+  return `
+    ${cabeceraHoja("Nota del día", esc(capitalizar(D.fechaHumana(fecha))))}
+    <div class="hoja-cuerpo">
+      <label class="campo">
+        <span>Comentario general (no corresponde a un estudiante)</span>
+        <textarea rows="3" data-rol="nota-dia" data-autofoco placeholder="Ej.: salida pedagógica, simulacro, cambio de horario">${esc(dia?.nota || "")}</textarea>
+      </label>
+    </div>
+    <footer class="hoja-pie">
+      ${dia?.nota ? `<button type="button" class="boton boton-fantasma texto-rojo" data-accion="borrar-nota-dia" data-fecha="${fecha}">Borrar nota</button>` : "<span></span>"}
+      <button type="button" class="boton boton-primario" data-accion="guardar-nota-dia" data-fecha="${fecha}">Guardar</button>
+    </footer>
+  `;
+}
+
+function hojaSinClase({ fecha, motivo = "" }) {
+  const cache = estado.cache.get(fecha.slice(0, 7));
+  const marcas = A.registrosDelDia(cache.registros, fecha).length;
+  const dia = cache.dias.get(fecha);
+  const actual = motivo || dia?.motivo || "";
+  const personalizado = actual && !D.MOTIVOS_SIN_CLASE.includes(actual) ? actual : "";
+  return `
+    ${cabeceraHoja("Marcar sin clase", esc(capitalizar(D.fechaHumana(fecha))))}
+    <div class="hoja-cuerpo">
+      <p class="tarjeta-nota">Un día sin clase no genera faltas ni cuenta en el resumen.</p>
+      <div class="campo">
+        <span>Motivo</span>
+        <div class="chips">
+          ${D.MOTIVOS_SIN_CLASE.map((opcion) => `<button type="button" class="chip${actual === opcion ? " puesta" : ""}" data-accion="motivo" data-motivo="${esc(opcion)}" aria-pressed="${actual === opcion}">${esc(opcion)}</button>`).join("")}
+        </div>
+      </div>
+      <label class="campo">
+        <span>Otro motivo o detalle</span>
+        <input type="text" data-rol="motivo-libre" value="${esc(personalizado)}" placeholder="Escribe el motivo" data-autofoco>
+      </label>
+      ${marcas ? `<p class="advertencia">${icono("alerta", { tamano: 18 })}<span>Este día tiene ${plural(marcas, "marca registrada", "marcas registradas")} (novedades u observaciones). Se borrarán para que el día no cuente; podrás deshacerlo desde el aviso.</span></p>` : ""}
+    </div>
+    <footer class="hoja-pie">
+      <button type="button" class="boton boton-fantasma" data-accion="cerrar-hoja">Cancelar</button>
+      <button type="button" class="boton boton-primario" data-accion="confirmar-sin-clase" data-fecha="${fecha}">Marcar sin clase</button>
+    </footer>
+  `;
+}
+
+function hojaEstudiante({ mat, mes }) {
+  const estudiante = estado.estudiantes.find((otro) => Number(otro.mat) === Number(mat));
+  if (!estudiante) return cabeceraHoja("Estudiante no encontrado");
+  const datos = datosMes(mes);
+  const fila = datos.resumen.filas.find((otra) => Number(otra.mat) === Number(mat));
+  const cache = estado.cache.get(mes);
+  const historial = A.historialEstudiante({ mat, diasDeClase: datos.resumen.diasDeClase, registros: [...cache.registros.values()] });
+  const novedades = historial.filter((dia) => dia.estado !== D.PRESENTE || dia.comentario || dia.etiquetas.length);
+  return `
+    ${cabeceraHoja(esc(A.nombreVisible(estudiante.nombre)), `No. ${esc(estudiante.no)} · Mat. ${esc(estudiante.mat)} · ${esc(D.mesHumano(mes))}`)}
+    <div class="hoja-cuerpo">
+      ${estudiante.notaPersistente ? `<p class="nota-persistente">${icono("info", { tamano: 16 })}${esc(estudiante.notaPersistente)}</p>` : ""}
+      ${fila?.alerta ? `<p class="advertencia">${icono("alerta", { tamano: 18 })}<span>${esc(D.textoAlerta(fila.alerta))}</span></p>` : ""}
+      <dl class="mini-datos mini-datos-fila">
+        <div><dt>Asistencia</dt><dd>${fila?.porcentaje ?? "—"}<small> %</small></dd></div>
+        <div><dt>Faltas</dt><dd class="texto-rojo">${fila?.ausente ?? 0}</dd></div>
+        <div><dt>Excusas</dt><dd class="texto-violeta">${fila?.excusa ?? 0}</dd></div>
+        <div><dt>Tardes</dt><dd class="texto-ambar">${fila?.tarde ?? 0}</dd></div>
+      </dl>
+      ${historial.length ? `
+        <div class="campo">
+          <span>Días de clase del mes</span>
+          <div class="tira-dias">
+            ${historial.map((dia) => `<a href="#/dia/${dia.fecha}" class="tira-dia e-${LETRA[dia.estado]}" title="${esc(`${A.diaCorto(dia.fecha)}: ${dia.estado}`)}"><span>${Number(dia.fecha.slice(8, 10))}</span><b>${D.letraEstado(dia.estado)}</b></a>`).join("")}
+          </div>
+        </div>
+      ` : ""}
+      <div class="campo">
+        <span>Novedades y observaciones</span>
+        ${novedades.length ? `
+          <ul class="lista-observaciones">
+            ${novedades.map((dia) => `
+              <li>
+                <a href="#/dia/${dia.fecha}" class="observacion">
+                  <span class="observacion-fecha">${esc(A.diaCorto(dia.fecha))}</span>
+                  <span class="observacion-cuerpo">
+                    <span class="etiqueta-estado e-${LETRA[dia.estado]}">${esc(dia.estado)}</span>
+                    <span class="observacion-texto">${esc([...dia.etiquetas, dia.comentario].filter(Boolean).join(" · ") || "Sin observación")}</span>
+                  </span>
+                </a>
+              </li>
+            `).join("")}
+          </ul>
+        ` : `<p class="vacio-suave">Asistió todos los días de clase del mes, sin observaciones.</p>`}
+      </div>
+    </div>
+    <footer class="hoja-pie">
+      <button type="button" class="boton boton-fantasma" data-accion="editar-estudiante" data-mat="${estudiante.mat}">${icono("editar", { tamano: 18 })}Editar datos</button>
+      <button type="button" class="boton boton-primario" data-accion="cerrar-hoja">Listo</button>
+    </footer>
+  `;
+}
+
+function hojaFormEstudiante({ mat = null }) {
+  const estudiante = mat == null ? null : estado.estudiantes.find((otro) => Number(otro.mat) === Number(mat));
+  const nuevo = !estudiante;
+  const siguienteNo = Math.max(0, ...estado.estudiantes.map((otro) => Number(otro.no) || 0)) + 1;
+  return `
+    ${cabeceraHoja(nuevo ? "Agregar estudiante" : "Editar estudiante", nuevo ? "Se agrega como activa al final de la lista." : esc(A.nombreVisible(estudiante.nombre)))}
+    <form class="formulario" data-accion="guardar-estudiante" ${nuevo ? "" : `data-mat="${estudiante.mat}"`} novalidate>
+      <div class="hoja-cuerpo">
+        <label class="campo">
+          <span>Nombre completo (Apellidos Nombres)</span>
+          <input name="nombre" value="${esc(estudiante?.nombre || "")}" required placeholder="APELLIDOS NOMBRES" autocomplete="off" data-autofoco>
+        </label>
+        <div class="campos-dos">
+          <label class="campo">
+            <span>No. en la lista</span>
+            <input name="no" type="number" min="1" inputmode="numeric" value="${esc(estudiante?.no ?? siguienteNo)}">
+          </label>
+          <label class="campo">
+            <span>Mat. No.</span>
+            <input name="mat" type="number" min="1" inputmode="numeric" value="${esc(estudiante?.mat ?? "")}" ${nuevo ? "required" : "disabled"}>
+          </label>
+        </div>
+        <label class="campo">
+          <span>Nota persistente (opcional)</span>
+          <input name="nota" value="${esc(estudiante?.notaPersistente || "")}" placeholder="Ej.: ajustes PIAR" autocomplete="off">
+        </label>
+        <p class="error-formulario" role="alert"></p>
+        ${!nuevo ? `
+          <div class="zona-estado">
+            <span>Estado: <strong>${estudiante.estado === "retirada" ? "Retirada" : "Activa"}</strong></span>
+            ${estudiante.estado === "retirada"
+              ? `<button type="button" class="boton boton-secundario boton-chico" data-accion="reactivar" data-mat="${estudiante.mat}">${icono("reactivar", { tamano: 17 })}Reactivar</button>`
+              : `<button type="button" class="boton boton-secundario boton-chico texto-rojo" data-accion="retirar" data-mat="${estudiante.mat}">${icono("retirar", { tamano: 17 })}Marcar como retirada</button>`}
+          </div>
+        ` : ""}
+      </div>
+      <footer class="hoja-pie">
+        <button type="button" class="boton boton-fantasma" data-accion="cerrar-hoja">Cancelar</button>
+        <button type="submit" class="boton boton-primario">Guardar</button>
+      </footer>
+    </form>
+  `;
+}
+
+function hojaCursos() {
+  return `
+    ${cabeceraHoja("Cursos", estado.cursos.length > 1 ? "Elige el curso para pasar lista." : "Tu cuenta tiene un curso.")}
+    <div class="hoja-cuerpo">
+      <ul class="lista-compacta">
+        ${estado.cursos.map((curso) => `
+          <li>
+            <button type="button" class="fila-boton${curso.id === estado.curso.id ? " activa" : ""}" data-accion="cambiar-curso" data-curso="${esc(curso.id)}" aria-current="${curso.id === estado.curso.id}">
+              <span class="avatar avatar-curso">${esc(slugCurso(curso))}</span>
+              <span class="fila-texto"><strong>Curso ${esc(curso.nombre)}</strong><small>${esc(curso.docente || "")}</small></span>
+              ${curso.id === estado.curso.id ? icono("check", { tamano: 18, clase: "fila-flecha texto-marca" }) : ""}
+            </button>
+          </li>
+        `).join("")}
+      </ul>
+      <p class="tarjeta-nota">La app está preparada para que otros docentes pasen lista en sus cursos con su propia cuenta. Cada curso guarda sus datos aparte.</p>
+    </div>
+  `;
+}
+
+function hojaConfirmar({ titulo, texto, boton, peligro }) {
+  return `
+    ${cabeceraHoja(esc(titulo))}
+    <div class="hoja-cuerpo"><p>${esc(texto)}</p></div>
+    <footer class="hoja-pie">
+      <button type="button" class="boton boton-fantasma" data-accion="cerrar-hoja">Cancelar</button>
+      <button type="button" class="boton ${peligro ? "boton-peligro" : "boton-primario"}" data-accion="aceptar-confirmacion" data-autofoco>${esc(boton)}</button>
+    </footer>
+  `;
+}
+
+function abrirHoja(hoja) {
+  estado.hoja = { ...hoja, enfocar: !esTactil() };
+  render();
+}
+
+function cerrarHoja() {
+  if (!estado.hoja) return;
+  estado.hoja = null;
+  render();
+}
+
+function confirmar(opciones) {
+  return new Promise((resolver) => {
+    abrirHoja({ tipo: "confirmar", ...opciones, resolver });
+  });
+}
+
+// ——— Cambios en la asistencia (misma semántica que la versión clásica) ———
 
 function prepararDia(cache, fecha) {
   const diaAnterior = cache.dias.get(fecha) || null;
@@ -131,656 +1485,22 @@ function prepararDia(cache, fecha) {
   return { diaAnterior, dia };
 }
 
-async function render() {
-  const token = ++tokenRender;
-  const ruta = parsearRuta();
-  actualizarEstiloPaginaPdf(ruta.vista === "pdf");
-  if (estado.modo === "sin-config") {
-    app.innerHTML = vistaSinConfig();
-    return;
+async function restaurarDia(cache, fecha, diaAnterior) {
+  if (diaAnterior) {
+    await estado.espacio.guardarDia(diaAnterior);
+    cache.dias.set(fecha, diaAnterior);
+  } else {
+    await estado.espacio.borrarDia(fecha);
+    cache.dias.delete(fecha);
   }
-  if (!estado.usuario) {
-    app.innerHTML = vistaEntrar();
-    return;
-  }
-  try {
-    if (ruta.vista === "dia" && ruta.param) {
-      let fecha = ruta.param;
-      if (fecha > D.hoyClave()) fecha = D.hoyClave();
-      const cache = await asegurarMes(fecha.slice(0, 7));
-      if (token !== tokenRender) return;
-      estado.mesVista = fecha.slice(0, 7);
-      estado.diaVista = fecha;
-      app.innerHTML = vistaDia(fecha, cache);
-    } else if (ruta.vista === "resumen") {
-      const mes = /^\d{4}-\d{2}$/.test(ruta.param || "") ? ruta.param : estado.mesVista;
-      await asegurarMes(mes);
-      if (token !== tokenRender) return;
-      estado.mesVista = mes;
-      app.innerHTML = vistaResumen(mes);
-    } else if (ruta.vista === "lista") {
-      app.innerHTML = vistaLista();
-    } else if (ruta.vista === "pdf") {
-      const mes = /^\d{4}-\d{2}$/.test(ruta.param || "") ? ruta.param : estado.mesVista;
-      await asegurarMes(mes);
-      if (token !== tokenRender) return;
-      estado.mesVista = mes;
-      app.innerHTML = vistaPdf(mes);
-      prepararLibrerias().catch(() => {});
-    } else {
-      const mes = /^\d{4}-\d{2}$/.test(ruta.param || "") ? ruta.param : estado.mesVista;
-      const cache = await asegurarMes(mes);
-      if (token !== tokenRender) return;
-      estado.mesVista = mes;
-      app.innerHTML = vistaMes(mes, cache);
-    }
-  } catch (error) {
-    console.error(error);
-    app.innerHTML = vistaError(error);
-  }
-}
-
-function cabecera() {
-  const demo = estado.modo === "demo"
-    ? `<div class="banda-demo no-imprimir">Modo demo: los datos quedan solo en este navegador.</div>`
-    : "";
-  return `
-    <header class="cabecera no-imprimir">
-      <div class="marca-app">
-        <img class="logo-app" src="assets/institution/logo_colegio.png" alt="Escudo de la IED Brisas del Río">
-        <div class="textos">
-          <span class="titulo">Asistencia 10°-A</span>
-          <span class="sub">IED Brisas del Río</span>
-        </div>
-      </div>
-    </header>
-    ${demo}
-  `;
-}
-
-function navInferior(activa) {
-  const botones = [
-    ["mes", "Mes", `#/mes/${estado.mesVista}`],
-    ["resumen", "Resumen", `#/resumen/${estado.mesVista}`],
-    ["lista", "Lista", "#/lista"],
-  ];
-  return `
-    <nav class="nav-inferior no-imprimir">
-      ${botones.map(([id, etiqueta, destino]) => `
-        <button class="${activa === id ? "activo" : ""}" data-accion="navegar" data-destino="${destino}">${etiqueta}</button>
-      `).join("")}
-    </nav>
-  `;
-}
-
-function vistaSinConfig() {
-  return `
-    <main class="contenido">
-      <section class="bloque tarjeta-config">
-        <img class="logo-config" src="assets/institution/logo_colegio.png" alt="">
-        <h1>Asistencia 10°-A</h1>
-        <p>Falta conectar la base de datos (Firebase). Sigue los pasos de <code>README.md</code> y pega la configuración en <code>src/firebase-config.js</code>.</p>
-        <p>Mientras tanto puedes explorar la aplicación con datos de ejemplo:</p>
-        <a class="boton-secundario" href="?demo=1">Ver modo demo</a>
-      </section>
-    </main>
-  `;
-}
-
-function vistaEntrar() {
-  if (estado.modo === "demo") {
-    return `
-      <main class="pantalla-entrar">
-        <section class="tarjeta">
-          <img class="logo-tarjeta" src="assets/institution/logo_colegio.png" alt="">
-          <h1>Asistencia 10°-A</h1>
-          <p class="sub">IED Brisas del Río</p>
-          <p class="demo-nota">Estás en modo demo: los datos quedan solo en este navegador.</p>
-          <button class="boton-principal" data-accion="entrar-demo">Entrar al modo demo</button>
-        </section>
-      </main>
-    `;
-  }
-  return `
-    <main class="pantalla-entrar">
-      <section class="tarjeta">
-        <img class="logo-tarjeta" src="assets/institution/logo_colegio.png" alt="">
-        <h1>Asistencia 10°-A</h1>
-        <p class="sub">IED Brisas del Río</p>
-        <form data-accion="entrar">
-          <label class="campo">Correo
-            <input type="email" name="correo" autocomplete="username" required>
-          </label>
-          <label class="campo">Contraseña
-            <input type="password" name="clave" autocomplete="current-password" required>
-          </label>
-          <button type="submit" class="boton-principal">Entrar</button>
-          <p class="error" id="error-entrar"></p>
-        </form>
-      </section>
-    </main>
-  `;
-}
-
-function vistaError(error) {
-  return `
-    <main class="contenido">
-      <section class="bloque">
-        <p>No se pudieron cargar los datos. Revisa la conexión e intenta de nuevo.</p>
-        <p class="detalle-error">${esc(error?.message || error)}</p>
-        <button class="boton-secundario" data-accion="reintentar">Reintentar</button>
-      </section>
-    </main>
-  `;
-}
-
-function vistaMes(mes, cache) {
-  const hoy = D.hoyClave();
-  const totalDias = D.diasEnMes(mes);
-  const desplazamiento = D.primerDiaSemana(mes);
-  const resumen = D.resumenDelMes({
-    estudiantes: estado.estudiantes,
-    dias: [...cache.dias.values()],
-    registros: [...cache.registros.values()],
-    ajustes: estado.ajustes,
-  });
-
-  let celdas = "";
-  for (let i = 0; i < desplazamiento; i++) celdas += `<span class="celda-vacia"></span>`;
-  for (let dia = 1; dia <= totalDias; dia++) {
-    const fecha = D.claveDelDia(mes, dia);
-    const futuro = fecha > hoy;
-    const finde = D.esFinDeSemana(mes, dia);
-    const diaDoc = cache.dias.get(fecha);
-    let marca = "";
-    if (diaDoc && diaDoc.tipo === "sinClase") marca = "sin-clase";
-    else if (diaDoc) marca = "guardado";
-    else if (!futuro && !finde) marca = "pendiente";
-    const clases = ["celda-dia"];
-    if (finde) clases.push("finde");
-    if (fecha === hoy) clases.push("hoy");
-    if (futuro) clases.push("futuro");
-    celdas += `
-      <button class="${clases.join(" ")}" data-accion="abrir-dia" data-fecha="${fecha}" ${futuro ? "disabled" : ""} ${fecha === hoy ? 'aria-current="date"' : ""} aria-label="${esc(D.fechaHumana(fecha))}">
-        <span class="numero">${dia}</span>
-        <span class="marca ${marca}"></span>
-      </button>
-    `;
-  }
-
-  return `
-    ${cabecera()}
-    <main class="contenido">
-      <section class="bloque">
-        <div class="navegador-mes">
-          <button class="boton-icono" data-accion="mes-anterior" aria-label="Mes anterior">‹</button>
-          <h2>${D.mesHumano(mes)}</h2>
-          <button class="boton-icono" data-accion="mes-siguiente" aria-label="Mes siguiente">›</button>
-        </div>
-        <div class="calendario">
-          ${["L", "M", "X", "J", "V", "S", "D"].map((letra) => `<span class="dia-semana">${letra}</span>`).join("")}
-          ${celdas}
-        </div>
-        <p class="leyenda-calendario">
-          <span><span class="marca guardado"></span>Registrado</span>
-          <span><span class="marca pendiente"></span>Pendiente</span>
-          <span><span class="marca sin-clase"></span>Sin clase</span>
-        </p>
-        <div class="resumen-mes">
-          <span class="dato">${plural(resumen.totales.diasDeClase, "día de clase", "días de clase")}</span>
-          <span class="dato rojo">${plural(resumen.totales.ausente, "falta en el mes", "faltas en el mes")}</span>
-        </div>
-        <button class="boton-principal" data-accion="ir-hoy">${cache.dias.has(hoy) ? "Ver el pase de hoy" : "Pasar lista de hoy"}</button>
-      </section>
-    </main>
-    ${navInferior("mes")}
-  `;
-}
-
-function filaEstudiante(fecha, estudiante, cache) {
-  const registro = cache.registros.get(D.claveRegistro(fecha, estudiante.mat));
-  const actual = D.estadoDe(registro);
-  const abierto = estado.comentarioAbierto === estudiante.mat;
-  const tieneComentario = Boolean(registro && (registro.comentario || (registro.etiquetas && registro.etiquetas.length)));
-
-  const botones = D.ESTADOS.map((opcion) => {
-    const activa = opcion === actual;
-    return `
-      <button type="button" class="pastilla e-${D.letraEstado(opcion).toLowerCase()}${activa ? " activa" : ""}"
-        data-accion="estado" data-fecha="${fecha}" data-mat="${estudiante.mat}" data-estado="${opcion}"
-        aria-pressed="${activa}" aria-label="${opcion} para ${esc(estudiante.nombre)}">${D.letraEstado(opcion)}</button>
-    `;
-  }).join("");
-
-  const etiquetas = D.ETIQUETAS_RAPIDAS.map((etiqueta) => {
-    const puesta = abierto
-      ? estado.etiquetasBorrador.includes(etiqueta)
-      : Boolean(registro?.etiquetas?.includes(etiqueta));
-    return `<button type="button" class="chip${puesta ? " puesta" : ""}" data-accion="etiqueta" data-etiqueta="${esc(etiqueta)}">${esc(etiqueta)}</button>`;
-  }).join("");
-
-  const nota = estudiante.notaPersistente
-    ? `<span class="nota-persistente">${esc(estudiante.notaPersistente)}</span>`
-    : "";
-
-  return `
-    <li class="fila">
-      <div class="fila-principal">
-        <span class="fila-numero">${estudiante.no}</span>
-        <span class="fila-nombre">${esc(estudiante.nombre)}${nota}</span>
-        <div class="estados" role="group" aria-label="Estado de ${esc(estudiante.nombre)}">${botones}</div>
-        <button type="button" class="boton-comentario${tieneComentario ? " lleno" : ""}" data-accion="comentario" data-mat="${estudiante.mat}" aria-label="Comentario de ${esc(estudiante.nombre)}" aria-expanded="${abierto}">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 4h16v11H8l-4 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
-        </button>
-      </div>
-      ${abierto ? `
-        <div class="caja-comentario">
-          <textarea data-comentario="${estudiante.mat}" rows="2" placeholder="Observación del día…">${esc(registro?.comentario || "")}</textarea>
-          <div class="chips">${etiquetas}</div>
-          <div class="acciones-comentario">
-            <button type="button" class="boton-secundario" data-accion="quitar-comentario" data-fecha="${fecha}" data-mat="${estudiante.mat}">Quitar</button>
-            <button type="button" class="boton-principal compacto" data-accion="guardar-comentario" data-fecha="${fecha}" data-mat="${estudiante.mat}">Guardar</button>
-          </div>
-        </div>
-      ` : ""}
-    </li>
-  `;
-}
-
-function vistaDia(fecha, cache) {
-  const dia = cache.dias.get(fecha) || { fecha, tipo: "clase", motivo: "", nota: "" };
-  const sinClase = dia.tipo === "sinClase";
-  const activos = estado.estudiantes.filter((estudiante) => estudiante.estado !== "retirada");
-  const contadores = D.contadoresDelDia(
-    activos.map((estudiante) => cache.registros.get(D.claveRegistro(fecha, estudiante.mat)) || { estado: D.PRESENTE })
-  );
-  const filas = activos.map((estudiante) => filaEstudiante(fecha, estudiante, cache)).join("");
-
-  const motivoPersonalizado = dia.motivo && !D.MOTIVOS_SIN_CLASE.includes(dia.motivo);
-  const bloqueSinClase = `
-    <div class="aviso-sin-clase">Día sin clase: no genera faltas ni cuenta en el resumen.</div>
-    <label class="campo">Motivo
-      <select data-campo="motivo-dia">
-        ${D.MOTIVOS_SIN_CLASE.map((motivo) => `<option value="${esc(motivo)}" ${motivo === dia.motivo ? "selected" : ""}>${esc(motivo)}</option>`).join("")}
-        <option value="__otro" ${motivoPersonalizado || !dia.motivo ? "selected" : ""}>Otro…</option>
-      </select>
-    </label>
-    <label class="campo">Detalle (opcional)
-      <input data-campo="motivo-detalle" value="${esc(motivoPersonalizado ? dia.motivo : "")}" placeholder="Escribe el motivo">
-    </label>
-    <button class="boton-secundario" data-accion="volver-clase" data-fecha="${fecha}">Marcar como día de clase</button>
-  `;
-
-  const bloqueNota = estado.notaAbierta
-    ? `
-      <div class="caja-nota-dia">
-        <textarea data-campo="nota-texto" rows="2" placeholder="Nota general del día (p. ej. salida pedagógica)">${esc(dia.nota || "")}</textarea>
-        <div class="acciones-comentario">
-          <button type="button" class="boton-secundario" data-accion="nota-dia" data-fecha="${fecha}">Cerrar</button>
-          <button type="button" class="boton-principal compacto" data-accion="guardar-nota-dia" data-fecha="${fecha}">Guardar nota</button>
-        </div>
-      </div>
-    `
-    : `
-      <button type="button" class="enlace nota-dia" data-accion="nota-dia" data-fecha="${fecha}">
-        ${dia.nota ? "Editar nota del día" : "Agregar nota del día"}
-      </button>
-      ${dia.nota ? `<p class="texto-nota-dia">${esc(dia.nota)}</p>` : ""}
-    `;
-
-  const bloqueClase = `
-    <div class="contadores">
-      <span class="dato verde">${plural(contadores.presente, "presente", "presentes")}</span>
-      <span class="dato rojo">${plural(contadores.ausente, "ausente", "ausentes")}</span>
-      <span class="dato ambar">${plural(contadores.tarde, "tarde", "tardes")}</span>
-      <span class="dato azul">${plural(contadores.excusa, "excusa", "excusas")}</span>
-    </div>
-    <div class="acciones-dia">
-      <button class="boton-secundario" data-accion="todos-presentes" data-fecha="${fecha}">Todos presentes</button>
-      ${estado.deshacer ? `<button class="boton-secundario" data-accion="deshacer">Deshacer</button>` : ""}
-      <button class="boton-secundario" data-accion="sin-clase" data-fecha="${fecha}">Sin clase</button>
-    </div>
-    ${bloqueNota}
-  `;
-
-  return `
-    ${cabecera()}
-    <main class="contenido">
-      <section class="bloque">
-        <div class="navegador-mes">
-          <button class="boton-icono" data-accion="volver" aria-label="Volver al mes">‹</button>
-          <h2>${D.fechaHumana(fecha)}</h2>
-          <span></span>
-        </div>
-        ${sinClase ? bloqueSinClase : bloqueClase}
-        ${sinClase
-          ? `<p class="leyenda">Este día no cuenta en las estadísticas. Si registras asistencia, vuelve a marcarlo como día de clase.</p>`
-          : `<p class="leyenda">P presente · A ausente · T tarde · E excusa. Todos arrancan presentes: marca solo las excepciones.</p>`}
-      </section>
-      <section class="bloque sin-padding">
-        <ul class="lista-estudiantes">${filas}</ul>
-      </section>
-    </main>
-    ${navInferior("")}
-  `;
-}
-
-function vistaResumen(mes) {
-  const cache = estado.cache.get(mes);
-  const resumen = D.resumenDelMes({
-    estudiantes: estado.estudiantes,
-    dias: [...cache.dias.values()],
-    registros: [...cache.registros.values()],
-    ajustes: estado.ajustes,
-  });
-
-  const filas = resumen.filas.map((fila) => `
-    <tr class="${fila.alerta ? "alerta" : ""}">
-      <td class="num">${fila.no}</td>
-      <td class="nom">${esc(fila.nombre)}${fila.alerta ? `<span class="insignia">${esc(D.textoAlerta(fila.alerta))}</span>` : ""}</td>
-      <td>${fila.presente}</td>
-      <td>${fila.tarde}</td>
-      <td>${fila.excusa}</td>
-      <td class="fuerte">${fila.ausente}</td>
-      <td>${fila.porcentaje == null ? "—" : `${fila.porcentaje}%`}</td>
-    </tr>
-  `).join("");
-
-  return `
-    ${cabecera()}
-    <main class="contenido">
-      <section class="bloque">
-        <div class="solo-impresion">IED Brisas del Río · Asistencia 10°-A · ${D.mesHumano(mes)}</div>
-        <div class="navegador-mes no-imprimir">
-          <button class="boton-icono" data-accion="mes-anterior" aria-label="Mes anterior">‹</button>
-          <h2>Resumen · ${D.mesHumano(mes)}</h2>
-          <button class="boton-icono" data-accion="mes-siguiente" aria-label="Mes siguiente">›</button>
-        </div>
-        <table class="tabla">
-          <thead>
-            <tr>
-              <th class="num">No.</th>
-              <th class="nom">Estudiante</th>
-              <th title="Presente">P</th>
-              <th title="Tarde">T</th>
-              <th title="Excusa">E</th>
-              <th title="Ausente">A</th>
-              <th title="Porcentaje de asistencia">%</th>
-            </tr>
-          </thead>
-          <tbody>${filas}</tbody>
-          <tfoot>
-            <tr>
-              <td></td>
-              <td class="nom">TOTAL DEL CURSO</td>
-              <td>${resumen.totales.presente}</td>
-              <td>${resumen.totales.tarde}</td>
-              <td>${resumen.totales.excusa}</td>
-              <td class="fuerte">${resumen.totales.ausente}</td>
-              <td></td>
-            </tr>
-          </tfoot>
-        </table>
-        <p class="leyenda">${plural(resumen.totales.diasDeClase, "día de clase", "días de clase")} en el mes · % = (P + T) ÷ días de clase · Alerta: 3+ faltas seguidas o 5+ en el mes.</p>
-        <div class="grupo-botones no-imprimir">
-          <button class="boton-principal" data-accion="excel-mes">Descargar Excel del mes (lista, resumen, detalle y estadísticas)</button>
-          <button class="boton-secundario" data-accion="csv-resumen">Resumen (CSV)</button>
-          <button class="boton-secundario" data-accion="csv-matriz">Detalle por día (CSV)</button>
-          <button class="boton-secundario" data-accion="informe-pdf">Informe PDF (horizontal)</button>
-        </div>
-      </section>
-    </main>
-    ${navInferior("resumen")}
-  `;
-}
-
-function tarjetaEstadistica(valor, etiqueta) {
-  return `<div class="doc-stat"><strong>${esc(String(valor))}</strong><span>${esc(etiqueta)}</span></div>`;
-}
-
-function datosInforme(mes) {
-  const cache = estado.cache.get(mes);
-  const registros = [...cache.registros.values()];
-  const dias = [...cache.dias.values()];
-  const resumen = D.resumenDelMes({ estudiantes: estado.estudiantes, dias, registros, ajustes: estado.ajustes });
-  const matriz = D.matrizDelMes({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
-  const estadisticas = D.estadisticasDelMes({ estudiantes: estado.estudiantes, resumen });
-  return { mes, resumen, matriz, estadisticas };
-}
-
-function vistaPdf(mes) {
-  const { resumen, matriz, estadisticas } = datosInforme(mes);
-
-  const filas = resumen.filas.map((fila) => `
-    <tr class="${fila.alerta ? "alerta" : ""}">
-      <td>${fila.no}</td>
-      <td>${fila.mat}</td>
-      <td class="izq">${esc(fila.nombre)}</td>
-      <td>${resumen.totales.diasDeClase}</td>
-      <td>${fila.presente}</td>
-      <td>${fila.tarde}</td>
-      <td>${fila.excusa}</td>
-      <td><strong>${fila.ausente}</strong></td>
-      <td>${fila.porcentaje == null ? "—" : `${fila.porcentaje}%`}</td>
-      <td class="izq doc-alerta">${esc(D.textoAlerta(fila.alerta))}</td>
-    </tr>
-  `).join("");
-
-  const encabezadoDias = resumen.diasDeClase.map((fecha) => `<th>${Number(fecha.slice(8, 10))}</th>`).join("");
-  const filasMatriz = matriz.map((fila) => `
-    <tr>
-      <td>${fila.no}</td>
-      <td class="izq">${esc(fila.nombre)}</td>
-      ${fila.porDia.map((letra) => `<td class="doc-letra-${letra.toLowerCase()}">${letra}</td>`).join("")}
-    </tr>
-  `).join("");
-
-  return `
-    <div class="barra-pdf no-imprimir">
-      <button class="boton-secundario" data-accion="volver-pdf" data-mes="${mes}">‹ Volver al resumen</button>
-      <p class="nota-pdf">«Descargar PDF» genera el archivo A4 horizontal listo para guardar, enviar o imprimir.</p>
-      <div class="acciones-pdf">
-        <button class="boton-secundario" data-accion="imprimir-pdf">Imprimir</button>
-        <button class="boton-principal compacto" data-accion="descargar-pdf" data-mes="${mes}">Descargar PDF</button>
-      </div>
-    </div>
-    <div class="documento">
-      <header class="doc-membrete">
-        <div class="doc-membrete-izq">
-          <img class="doc-logo" src="assets/institution/logo_colegio.png" alt="">
-          <div class="doc-escuela">
-            <strong>INSTITUCIÓN EDUCATIVA DISTRITAL BRISAS DEL RÍO</strong>
-            <span>Resolución 5256 de 2017 · Barranquilla, Atlántico</span>
-          </div>
-        </div>
-        <div class="doc-titulo">
-          <strong>Informe mensual de asistencia</strong>
-          <span>Curso 10°-A · ${D.mesHumano(mes)}</span>
-          <span>Generado el ${D.fechaCortaHumana(D.hoyClave())}</span>
-        </div>
-      </header>
-      <div class="doc-regla"></div>
-
-      <section class="doc-seccion">
-        <h3>Resumen del mes por estudiante</h3>
-        <div class="doc-scroll">
-          <table class="doc-tabla">
-            <thead>
-              <tr>
-                <th>No.</th>
-                <th>Mat. No.</th>
-                <th class="izq">Estudiante</th>
-                <th>Días de clase</th>
-                <th title="Presente">P</th>
-                <th title="Tarde">T</th>
-                <th title="Excusa">E</th>
-                <th title="Ausente">A (Inas.)</th>
-                <th title="Porcentaje de asistencia">% Asist.</th>
-                <th class="izq">Alerta</th>
-              </tr>
-            </thead>
-            <tbody>${filas}</tbody>
-            <tfoot>
-              <tr>
-                <td></td>
-                <td></td>
-                <td class="izq">TOTAL DEL CURSO</td>
-                <td>${resumen.totales.diasDeClase}</td>
-                <td>${resumen.totales.presente}</td>
-                <td>${resumen.totales.tarde}</td>
-                <td>${resumen.totales.excusa}</td>
-                <td>${resumen.totales.ausente}</td>
-                <td>${estadisticas.porcentajeCurso == null ? "—" : `${estadisticas.porcentajeCurso}%`}</td>
-                <td></td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-        <p class="doc-nota">P presente · T tarde · E excusa justificada · A ausencia sin justificar (columna «Inas.» de las planillas) · % = (P + T) ÷ días de clase.</p>
-      </section>
-
-      <section class="doc-seccion nueva-pagina">
-        <h3>Estadísticas del curso</h3>
-        <div class="doc-stats">
-          ${tarjetaEstadistica(estadisticas.dias, "Días de clase")}
-          ${tarjetaEstadistica(estadisticas.porcentajeCurso == null ? "—" : `${estadisticas.porcentajeCurso}%`, "Asistencia del curso")}
-          ${tarjetaEstadistica(estadisticas.asistencias, "Asistencias (P + T)")}
-          ${tarjetaEstadistica(estadisticas.totales.ausente, "Faltas (Inas.)")}
-          ${tarjetaEstadistica(estadisticas.totales.tarde, "Tardes")}
-          ${tarjetaEstadistica(estadisticas.totales.excusa, "Excusas")}
-          ${tarjetaEstadistica(estadisticas.conAlerta, "Con alerta")}
-          ${tarjetaEstadistica(estadisticas.sinFaltas, "Sin faltas")}
-        </div>
-
-        <h3>Detalle por día</h3>
-        ${resumen.diasDeClase.length ? `<div class="doc-scroll">
-          <table class="doc-tabla doc-matriz">
-            <thead>
-              <tr>
-                <th>No.</th>
-                <th class="izq">Estudiante</th>
-                ${encabezadoDias}
-              </tr>
-            </thead>
-            <tbody>${filasMatriz}</tbody>
-          </table>
-        </div>
-        <p class="doc-nota">Cada columna es un día de clase del mes (número del día). Las letras siguen la misma convención del resumen.</p>`
-          : `<p class="doc-vacio">Este mes todavía no tiene días de clase registrados.</p>`}
-      </section>
-
-      <footer class="doc-pie">
-        <span>IED Brisas del Río · Asistencia 10°-A · documento de uso interno</span>
-        <span>${D.mesHumano(mes)}</span>
-      </footer>
-    </div>
-  `;
-}
-
-function filaListaEstudiante(estudiante) {
-  const editando = estado.formulario?.modo === "editar" && Number(estado.formulario.mat) === Number(estudiante.mat);
-  if (editando) {
-    return `
-      <li class="fila">
-        <form class="formulario-estudiante" data-accion="form-estudiante" data-mat="${estudiante.mat}">
-          <label class="campo">No. <input name="no" type="number" min="1" value="${estudiante.no}"></label>
-          <label class="campo">Nombre completo <input name="nombre" value="${esc(estudiante.nombre)}" required></label>
-          <label class="campo">Mat. No. <input value="${estudiante.mat}" disabled></label>
-          <label class="campo">Nota persistente <input name="nota" value="${esc(estudiante.notaPersistente || "")}" placeholder="Opcional (p. ej. ajustes PIAR)"></label>
-          <div class="acciones-comentario">
-            <button type="button" class="boton-secundario" data-accion="cancelar-form">Cancelar</button>
-            <button type="submit" class="boton-principal compacto">Guardar</button>
-          </div>
-        </form>
-      </li>
-    `;
-  }
-  return `
-    <li class="fila fila-estudiante">
-      <span class="fila-numero">${estudiante.no}</span>
-      <span class="fila-nombre">${esc(estudiante.nombre)}<span class="mat">Mat. ${estudiante.mat}</span></span>
-      <span class="estado-cuenta ${estudiante.estado === "retirada" ? "retirada" : ""}">${estudiante.estado === "retirada" ? "Retirada" : "Activa"}</span>
-      <span class="botonera">
-        <button class="boton-secundario compacto" data-accion="editar-estudiante" data-mat="${estudiante.mat}" aria-label="Editar ${esc(estudiante.nombre)}">Editar</button>
-        ${estudiante.estado === "retirada"
-          ? `<button class="boton-secundario compacto" data-accion="reactivar" data-mat="${estudiante.mat}" aria-label="Reactivar ${esc(estudiante.nombre)}">Reactivar</button>`
-          : `<button class="boton-secundario compacto" data-accion="retirar" data-mat="${estudiante.mat}" aria-label="Retirar ${esc(estudiante.nombre)}">Retirar</button>`}
-      </span>
-    </li>
-  `;
-}
-
-function vistaLista() {
-  const activos = estado.estudiantes.filter((estudiante) => estudiante.estado !== "retirada");
-  const retiradas = estado.estudiantes.filter((estudiante) => estudiante.estado === "retirada");
-  const nuevo = estado.formulario?.modo === "nuevo";
-
-  return `
-    ${cabecera()}
-    <main class="contenido">
-      <section class="bloque">
-        <h2>Estudiantes (${activos.length})</h2>
-        ${nuevo ? `
-          <form class="formulario-estudiante" data-accion="form-estudiante">
-            <label class="campo">No. <input name="no" type="number" min="1"></label>
-            <label class="campo">Nombre completo <input name="nombre" required placeholder="APELLIDOS NOMBRES"></label>
-            <label class="campo">Mat. No. <input name="mat" type="number" required></label>
-            <label class="campo">Nota persistente <input name="nota" placeholder="Opcional (p. ej. ajustes PIAR)"></label>
-            <div class="acciones-comentario">
-              <button type="button" class="boton-secundario" data-accion="cancelar-form">Cancelar</button>
-              <button type="submit" class="boton-principal compacto">Guardar</button>
-            </div>
-          </form>
-        ` : `
-          <button class="boton-secundario" data-accion="agregar-estudiante">Agregar estudiante</button>
-        `}
-        <ul class="lista-estudiantes">${activos.map(filaListaEstudiante).join("")}</ul>
-      </section>
-
-      ${retiradas.length ? `
-        <section class="bloque">
-          <h2>Retiradas (${retiradas.length})</h2>
-          <ul class="lista-estudiantes">${retiradas.map(filaListaEstudiante).join("")}</ul>
-        </section>
-      ` : ""}
-
-      <section class="bloque">
-        <h2>Datos</h2>
-        <div class="grupo-botones">
-          <button class="boton-secundario" data-accion="importar-lista">Importar lista base (JSON)</button>
-          <button class="boton-secundario" data-accion="csv-lista">Exportar lista (CSV)</button>
-          <button class="boton-secundario" data-accion="respaldo">Descargar respaldo (JSON)</button>
-          <button class="boton-secundario" data-accion="restaurar-respaldo">Restaurar respaldo (JSON)</button>
-        </div>
-        <input type="file" accept=".json,application/json" hidden data-rol="archivo-lista">
-        <input type="file" accept=".json,application/json" hidden data-rol="archivo-respaldo">
-        <p class="leyenda">«Exportar lista» descarga el listado de estudiantes. El respaldo guarda todo el histórico; restaurarlo lo vuelve a subir.</p>
-      </section>
-
-      <section class="bloque">
-        <h2>Cuenta</h2>
-        <p class="leyenda">${estado.usuario?.email ? `Sesión: ${esc(estado.usuario.email)}` : ""}</p>
-        <button class="boton-secundario" data-accion="salir">Cerrar sesión</button>
-      </section>
-    </main>
-    ${navInferior("lista")}
-  `;
-}
-
-function moverMes(delta) {
-  const ruta = parsearRuta();
-  const base = estado.mesVista;
-  const nuevo = delta < 0 ? D.mesAnterior(base) : D.mesSiguiente(base);
-  if (ruta.vista === "resumen") location.hash = `#/resumen/${nuevo}`;
-  else location.hash = `#/mes/${nuevo}`;
 }
 
 async function fijarEstado(fecha, mat, nuevoEstado) {
-  const mes = fecha.slice(0, 7);
-  const cache = estado.cache.get(mes);
+  const cache = estado.cache.get(fecha.slice(0, 7));
   if (!cache) return;
   const clave = D.claveRegistro(fecha, mat);
   const anterior = cache.registros.get(clave) || null;
+  if (D.estadoDe(anterior) === nuevoEstado && cache.dias.has(fecha)) return;
   const registro = {
     fecha,
     mat,
@@ -788,56 +1508,43 @@ async function fijarEstado(fecha, mat, nuevoEstado) {
     comentario: anterior?.comentario || "",
     etiquetas: anterior?.etiquetas ? [...anterior.etiquetas] : [],
   };
-  const esPredeterminado = registro.estado === D.PRESENTE && !registro.comentario && registro.etiquetas.length === 0;
+  const predeterminado = registro.estado === D.PRESENTE && !registro.comentario && !registro.etiquetas.length;
   const { diaAnterior, dia } = prepararDia(cache, fecha);
 
   estado.deshacer = async () => {
     if (anterior) {
-      await repo.guardarRegistro(anterior);
+      await estado.espacio.guardarRegistro(anterior);
       cache.registros.set(clave, anterior);
     } else {
-      await repo.borrarRegistro(fecha, mat);
+      await estado.espacio.borrarRegistro(fecha, mat);
       cache.registros.delete(clave);
     }
-    if (diaAnterior) {
-      await repo.guardarDia(diaAnterior);
-      cache.dias.set(fecha, diaAnterior);
-    } else {
-      await repo.borrarDia(fecha);
-      cache.dias.delete(fecha);
-    }
-    estado.deshacer = null;
-    render();
+    await restaurarDia(cache, fecha, diaAnterior);
   };
 
-  if (esPredeterminado) cache.registros.delete(clave);
+  if (predeterminado) cache.registros.delete(clave);
   else cache.registros.set(clave, registro);
   cache.dias.set(fecha, dia);
   render();
+  const estudiante = estado.estudiantes.find((otro) => Number(otro.mat) === Number(mat));
+  avisar(`${A.nombreVisible(estudiante?.nombre || "")}: ${nuevoEstado.toLowerCase()}`, { deshacer: true, duracion: 4500 });
 
-  try {
-    if (esPredeterminado) await repo.borrarRegistro(fecha, mat);
-    else await repo.guardarRegistro(registro);
-    await repo.guardarDia(dia);
-  } catch {
-    avisar("No se pudo guardar el cambio. Revisa la conexión.", "error");
-  }
+  await guardarEnSegundoPlano(async () => {
+    if (predeterminado) await estado.espacio.borrarRegistro(fecha, mat);
+    else await estado.espacio.guardarRegistro(registro);
+    await estado.espacio.guardarDia(dia);
+  }, "No se pudo guardar el cambio. Revisa la conexión.");
 }
 
 async function marcarTodosPresentes(fecha) {
-  const cache = estado.cache.get(fecha.slice(0, 7));
-  if (!cache) return;
+  const cache = estado.cache.get(fecha.slice(0, 7)) || await asegurarMes(fecha.slice(0, 7));
   const diaAnterior = cache.dias.get(fecha) || null;
   const dia = { fecha, tipo: "clase", motivo: "", nota: diaAnterior?.nota || "" };
-
-  const previos = [...cache.registros.values()]
-    .filter((registro) => registro.fecha === fecha)
-    .map((registro) => ({ ...registro, etiquetas: [...(registro.etiquetas || [])] }));
+  const previos = A.registrosDelDia(cache.registros, fecha).map((registro) => ({ ...registro, etiquetas: [...(registro.etiquetas || [])] }));
   const cambios = [];
-  for (const [clave, registro] of [...cache.registros]) {
-    if (registro.fecha !== fecha) continue;
-    const conNota = Boolean(registro.comentario) || Boolean(registro.etiquetas && registro.etiquetas.length);
-    if (conNota) {
+  for (const registro of previos) {
+    const clave = D.claveRegistro(fecha, registro.mat);
+    if (A.tieneObservacion(registro)) {
       const actualizado = { ...registro, estado: D.PRESENTE };
       cache.registros.set(clave, actualizado);
       cambios.push(["guardar", actualizado]);
@@ -848,176 +1555,118 @@ async function marcarTodosPresentes(fecha) {
   }
 
   estado.deshacer = async () => {
-    for (const [clave, registro] of [...cache.registros]) {
-      if (registro.fecha !== fecha) continue;
-      await repo.borrarRegistro(fecha, registro.mat);
-      cache.registros.delete(clave);
+    for (const registro of A.registrosDelDia(cache.registros, fecha)) {
+      await estado.espacio.borrarRegistro(fecha, registro.mat);
+      cache.registros.delete(D.claveRegistro(fecha, registro.mat));
     }
     for (const registro of previos) {
-      await repo.guardarRegistro(registro);
+      await estado.espacio.guardarRegistro(registro);
       cache.registros.set(D.claveRegistro(fecha, registro.mat), registro);
     }
-    if (diaAnterior) {
-      await repo.guardarDia(diaAnterior);
-      cache.dias.set(fecha, diaAnterior);
-    } else {
-      await repo.borrarDia(fecha);
-      cache.dias.delete(fecha);
-    }
-    estado.deshacer = null;
-    render();
+    await restaurarDia(cache, fecha, diaAnterior);
   };
 
   cache.dias.set(fecha, dia);
+  estado.filtro = null;
   render();
-  try {
+  avisar("Día registrado: todos presentes.", { deshacer: true });
+  await guardarEnSegundoPlano(async () => {
     for (const [operacion, registro] of cambios) {
-      if (operacion === "borrar") await repo.borrarRegistro(fecha, registro.mat);
-      else await repo.guardarRegistro(registro);
+      if (operacion === "borrar") await estado.espacio.borrarRegistro(fecha, registro.mat);
+      else await estado.espacio.guardarRegistro(registro);
     }
-    await repo.guardarDia(dia);
-    avisar("Día registrado: todos presentes.");
-  } catch {
-    avisar("No se pudo guardar. Revisa la conexión.", "error");
-  }
+    await estado.espacio.guardarDia(dia);
+  });
 }
 
-async function fijarTipoDia(fecha, tipo, motivo) {
+async function marcarSinClase(fecha, motivo) {
   const cache = estado.cache.get(fecha.slice(0, 7));
   if (!cache) return;
   const diaAnterior = cache.dias.get(fecha) || null;
-  const dia = {
-    fecha,
-    tipo,
-    motivo: motivo || "",
-    nota: diaAnterior?.nota || "",
-  };
+  const dia = { fecha, tipo: "sinClase", motivo, nota: diaAnterior?.nota || "" };
+  const borrados = A.registrosDelDia(cache.registros, fecha);
 
   estado.deshacer = async () => {
-    if (diaAnterior) {
-      await repo.guardarDia(diaAnterior);
-      cache.dias.set(fecha, diaAnterior);
-    } else {
-      await repo.borrarDia(fecha);
-      cache.dias.delete(fecha);
+    for (const registro of borrados) {
+      await estado.espacio.guardarRegistro(registro);
+      cache.registros.set(D.claveRegistro(fecha, registro.mat), registro);
     }
-    estado.deshacer = null;
-    render();
+    await restaurarDia(cache, fecha, diaAnterior);
   };
 
+  for (const registro of borrados) cache.registros.delete(D.claveRegistro(fecha, registro.mat));
   cache.dias.set(fecha, dia);
+  estado.hoja = null;
   render();
-  try {
-    await repo.guardarDia(dia);
-  } catch {
-    avisar("No se pudo guardar. Revisa la conexión.", "error");
-  }
+  avisar(`Día marcado sin clase${motivo ? `: ${motivo}` : ""}.`, { deshacer: true });
+  await guardarEnSegundoPlano(async () => {
+    for (const registro of borrados) await estado.espacio.borrarRegistro(fecha, registro.mat);
+    await estado.espacio.guardarDia(dia);
+  });
 }
 
-async function guardarMotivoDia(fecha, motivo) {
+async function volverAClase(fecha) {
   const cache = estado.cache.get(fecha.slice(0, 7));
   if (!cache) return;
-  const diaAnterior = cache.dias.get(fecha) || { fecha, tipo: "sinClase", motivo: "", nota: "" };
-  const dia = { ...diaAnterior, tipo: "sinClase", motivo };
+  const diaAnterior = cache.dias.get(fecha) || null;
+  const dia = { fecha, tipo: "clase", motivo: "", nota: diaAnterior?.nota || "" };
+  estado.deshacer = async () => restaurarDia(cache, fecha, diaAnterior);
   cache.dias.set(fecha, dia);
-  try {
-    await repo.guardarDia(dia);
-  } catch {
-    avisar("No se pudo guardar el motivo.", "error");
-  }
+  render();
+  avisar("Día de clase: todos quedan presentes.", { deshacer: true });
+  await guardarEnSegundoPlano(() => estado.espacio.guardarDia(dia));
 }
 
-async function guardarNotaDia(fecha) {
-  const campo = document.querySelector('[data-campo="nota-texto"]');
-  const nota = (campo?.value || "").trim();
+async function guardarNotaDia(fecha, nota) {
   const cache = estado.cache.get(fecha.slice(0, 7));
   if (!cache) return;
   const diaAnterior = cache.dias.get(fecha) || null;
   const dia = diaAnterior ? { ...diaAnterior, nota } : { fecha, tipo: "clase", motivo: "", nota };
   cache.dias.set(fecha, dia);
-  estado.notaAbierta = false;
+  estado.hoja = null;
   render();
-  try {
-    await repo.guardarDia(dia);
-    avisar("Nota del día guardada.");
-  } catch {
-    avisar("No se pudo guardar la nota.", "error");
-  }
+  const ok = await guardarEnSegundoPlano(() => estado.espacio.guardarDia(dia), "No se pudo guardar la nota.");
+  if (ok) avisar(nota ? "Nota del día guardada." : "Nota del día borrada.");
 }
 
-async function guardarComentario(fecha, mat) {
+async function guardarObservacion(fecha, mat, comentario, etiquetas) {
   const cache = estado.cache.get(fecha.slice(0, 7));
   if (!cache) return;
   const clave = D.claveRegistro(fecha, mat);
   const anterior = cache.registros.get(clave) || null;
-  const campo = document.querySelector(`textarea[data-comentario="${mat}"]`);
-  const comentario = (campo?.value || "").trim();
-  const etiquetas = [...estado.etiquetasBorrador];
-  const registro = {
-    fecha,
-    mat,
-    estado: anterior?.estado || D.PRESENTE,
-    comentario,
-    etiquetas,
-  };
-  const esPredeterminado = registro.estado === D.PRESENTE && !comentario && etiquetas.length === 0;
-  const { dia } = prepararDia(cache, fecha);
+  const registro = { fecha, mat, estado: anterior?.estado || D.PRESENTE, comentario, etiquetas };
+  const predeterminado = registro.estado === D.PRESENTE && !comentario && !etiquetas.length;
+  const { diaAnterior, dia } = prepararDia(cache, fecha);
 
-  if (esPredeterminado) cache.registros.delete(clave);
+  estado.deshacer = async () => {
+    if (anterior) {
+      await estado.espacio.guardarRegistro(anterior);
+      cache.registros.set(clave, anterior);
+    } else {
+      await estado.espacio.borrarRegistro(fecha, mat);
+      cache.registros.delete(clave);
+    }
+    await restaurarDia(cache, fecha, diaAnterior);
+  };
+
+  if (predeterminado) cache.registros.delete(clave);
   else cache.registros.set(clave, registro);
   cache.dias.set(fecha, dia);
+  estado.hoja = null;
   render();
-
-  try {
-    if (esPredeterminado) await repo.borrarRegistro(fecha, mat);
-    else await repo.guardarRegistro(registro);
-    await repo.guardarDia(dia);
-    avisar("Comentario guardado.");
-  } catch {
-    avisar("No se pudo guardar el comentario.", "error");
-  }
+  avisar(predeterminado ? "Observación quitada." : "Observación guardada.", { deshacer: true });
+  await guardarEnSegundoPlano(async () => {
+    if (predeterminado) await estado.espacio.borrarRegistro(fecha, mat);
+    else await estado.espacio.guardarRegistro(registro);
+    await estado.espacio.guardarDia(dia);
+  }, "No se pudo guardar la observación.");
 }
 
-async function importarListaDeArchivo(archivo) {
-  if (!archivo) return;
-  try {
-    const contenido = JSON.parse(await archivo.text());
-    const lista = Array.isArray(contenido) ? contenido : contenido.estudiantes;
-    if (!Array.isArray(lista) || !lista.length) throw new Error("El archivo no trae estudiantes.");
-    const normalizados = lista.map(normalizarEstudiante).filter(Boolean);
-    if (!normalizados.length) throw new Error("No se encontró ningún estudiante válido.");
-    if (!confirm(`Se van a importar o actualizar ${normalizados.length} estudiantes por Mat. No. ¿Continuar?`)) return;
-    await repo.importarLista(normalizados);
-    estado.estudiantes = await repo.listarEstudiantes();
-    render();
-    avisar(`Lista importada: ${normalizados.length} estudiantes.`);
-  } catch (error) {
-    avisar(`No se pudo importar la lista: ${error.message}`, "error");
-  }
-}
-
-async function restaurarDeArchivo(archivo) {
-  if (!archivo) return;
-  try {
-    const contenido = JSON.parse(await archivo.text());
-    const estudiantes = contenido.estudiantes || [];
-    const dias = contenido.dias || [];
-    const registros = contenido.registros || [];
-    if (!estudiantes.length && !registros.length) throw new Error("El archivo no parece un respaldo.");
-    if (!confirm(`Se van a restaurar ${estudiantes.length} estudiantes y ${registros.length} registros de asistencia. ¿Continuar?`)) return;
-    await repo.importarTodo({ estudiantes, dias, registros });
-    estado.cache.clear();
-    estado.estudiantes = await repo.listarEstudiantes();
-    render();
-    avisar("Respaldo restaurado.");
-  } catch (error) {
-    avisar(`No se pudo restaurar: ${error.message}`, "error");
-  }
-}
+// ——— Estudiantes y datos ———
 
 function normalizarEstudiante(bruto) {
   const mat = Number(bruto?.mat);
-  const nombre = String(bruto?.nombre || "").trim();
+  const nombre = String(bruto?.nombre || "").trim().replace(/\s+/g, " ");
   if (!mat || !nombre) return null;
   return {
     mat,
@@ -1028,116 +1677,27 @@ function normalizarEstudiante(bruto) {
   };
 }
 
-async function exportarResumenCsv() {
-  const mes = estado.mesVista;
-  const cache = estado.cache.get(mes);
-  const resumen = D.resumenDelMes({
-    estudiantes: estado.estudiantes,
-    dias: [...cache.dias.values()],
-    registros: [...cache.registros.values()],
-    ajustes: estado.ajustes,
-  });
-  descargar(`asistencia-10A_resumen_${mes}.csv`, "\uFEFF" + D.csvResumen(resumen, { curso: "10°-A", mes }), "text/csv;charset=utf-8");
-}
-
-async function exportarMatrizCsv() {
-  const mes = estado.mesVista;
-  const cache = estado.cache.get(mes);
-  const resumen = D.resumenDelMes({
-    estudiantes: estado.estudiantes,
-    dias: [...cache.dias.values()],
-    registros: [...cache.registros.values()],
-    ajustes: estado.ajustes,
-  });
-  const matriz = D.matrizDelMes({
-    estudiantes: estado.estudiantes,
-    diasDeClase: resumen.diasDeClase,
-    registros: [...cache.registros.values()],
-  });
-  descargar(
-    `asistencia-10A_detalle_${mes}.csv`,
-    "\uFEFF" + D.csvMatriz(matriz, { curso: "10°-A", mes, diasDeClase: resumen.diasDeClase }),
-    "text/csv;charset=utf-8"
-  );
-}
-
-function exportarListaCsv() {
-  const lista = [...estado.estudiantes].sort((a, b) => Number(a.no || 0) - Number(b.no || 0));
-  descargar("Asistencia_10A_lista.csv", "\uFEFF" + D.csvLista(lista, { curso: "10°-A" }), "text/csv;charset=utf-8");
-  avisar("Lista exportada.");
-}
-
-function exportarExcelDelMes() {
-  const mes = estado.mesVista;
-  const cache = estado.cache.get(mes);
-  const registros = [...cache.registros.values()];
-  const dias = [...cache.dias.values()];
-  const resumen = D.resumenDelMes({ estudiantes: estado.estudiantes, dias, registros, ajustes: estado.ajustes });
-  const matriz = D.matrizDelMes({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
-  const porDia = D.estadisticasPorDia({ estudiantes: estado.estudiantes, diasDeClase: resumen.diasDeClase, registros });
-  const estadisticas = D.estadisticasDelMes({ estudiantes: estado.estudiantes, resumen });
-  const hojas = D.hojasXlsxDelMes({ curso: "10°-A", mes, estudiantes: estado.estudiantes, resumen, matriz, porDia, estadisticas });
-  const archivo = crearXlsx(hojas);
-  const nombre = `Asistencia_10A_${D.mesHumano(mes).replace(" ", "_")}.xlsx`;
-  descargar(nombre, archivo, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  avisar("Excel del mes descargado.");
-}
-
-async function descargarInformePdf(boton) {
-  if (boton.disabled) return;
-  const mes = boton.dataset.mes || estado.mesVista;
-  const textoOriginal = boton.textContent;
-  boton.disabled = true;
-  boton.textContent = "Preparando…";
-  try {
-    await asegurarMes(mes);
-    const blob = await crearInformePdf(datosInforme(mes));
-    const nombre = nombreInformePdf(mes);
-    const archivo = new File([blob], nombre, { type: "application/pdf" });
-    const tactil = window.matchMedia("(pointer: coarse)").matches;
-    if (tactil && navigator.canShare?.({ files: [archivo] })) {
-      try {
-        await navigator.share({ files: [archivo], title: nombre });
-        return;
-      } catch (error) {
-        if (error?.name === "AbortError") return;
-      }
-    }
-    descargar(nombre, blob, "application/pdf");
-    avisar("Informe PDF descargado.");
-  } catch (error) {
-    console.error(error);
-    avisar("No se pudo generar el PDF. Revisa la conexión o usa «Imprimir».", "error");
-  } finally {
-    boton.disabled = false;
-    boton.textContent = textoOriginal;
-  }
-}
-
-async function descargarRespaldo() {
-  try {
-    const datos = await repo.exportarTodo();
-    descargar(`respaldo_asistencia-10A_${D.hoyClave()}.json`, JSON.stringify(datos, null, 2), "application/json");
-    avisar("Respaldo descargado.");
-  } catch {
-    avisar("No se pudo descargar el respaldo.", "error");
-  }
-}
-
 async function guardarEstudianteDeFormulario(formulario) {
   const datos = new FormData(formulario);
-  const esEdicion = Boolean(formulario.dataset.mat);
-  const mat = esEdicion ? Number(formulario.dataset.mat) : Number(datos.get("mat"));
-  const nombre = String(datos.get("nombre") || "").trim();
+  const edicion = Boolean(formulario.dataset.mat);
+  const mat = edicion ? Number(formulario.dataset.mat) : Number(datos.get("mat"));
+  const nombre = String(datos.get("nombre") || "").trim().replace(/\s+/g, " ").toLocaleUpperCase("es");
   const no = Number(datos.get("no")) || 0;
   const nota = String(datos.get("nota") || "").trim();
-  if (!mat || !nombre) {
-    avisar("Completa el Mat. No. y el nombre.", "error");
+  const error = formulario.querySelector(".error-formulario");
+  if (!nombre) {
+    error.textContent = "Escribe el nombre completo.";
+    formulario.nombre.focus();
+    return;
+  }
+  if (!mat || mat < 1) {
+    error.textContent = "Escribe un Mat. No. válido.";
+    formulario.mat?.focus();
     return;
   }
   const existente = estado.estudiantes.find((estudiante) => Number(estudiante.mat) === mat);
-  if (!esEdicion && existente) {
-    avisar("Ya existe un estudiante con ese Mat. No.", "error");
+  if (!edicion && existente) {
+    error.textContent = `Ya existe un estudiante con el Mat. No. ${mat} (${A.nombreVisible(existente.nombre)}).`;
     return;
   }
   const estudiante = {
@@ -1147,68 +1707,224 @@ async function guardarEstudianteDeFormulario(formulario) {
     estado: existente?.estado || "activo",
     notaPersistente: nota || null,
   };
-  try {
-    await repo.guardarEstudiante(estudiante);
-    estado.estudiantes = ordenarLocal([
-      ...estado.estudiantes.filter((otro) => Number(otro.mat) !== mat),
-      estudiante,
-    ]);
-    estado.formulario = null;
-    render();
-    avisar("Estudiante guardado.");
-  } catch {
-    avisar("No se pudo guardar el estudiante.", "error");
-  }
+  const boton = formulario.querySelector("button[type=submit]");
+  boton.disabled = true;
+  const ok = await guardarEnSegundoPlano(() => estado.espacio.guardarEstudiante(estudiante), "No se pudo guardar el estudiante.");
+  boton.disabled = false;
+  if (!ok) return;
+  estado.estudiantes = ordenarLocal([...estado.estudiantes.filter((otro) => Number(otro.mat) !== mat), estudiante]);
+  estado.hoja = null;
+  render();
+  avisar(edicion ? "Datos actualizados." : "Estudiante agregado.");
 }
 
 async function cambiarEstadoEstudiante(mat, nuevoEstado) {
   const existente = estado.estudiantes.find((estudiante) => Number(estudiante.mat) === Number(mat));
   if (!existente) return;
+  if (nuevoEstado === "retirada") {
+    const ok = await confirmar({
+      titulo: "Marcar como retirada",
+      texto: `${A.nombreVisible(existente.nombre)} dejará de aparecer en el pase y en las estadísticas. Su historial se conserva y puedes reactivarla cuando quieras.`,
+      boton: "Marcar como retirada",
+      peligro: true,
+    });
+    if (!ok) return;
+  }
   const estudiante = { ...existente, estado: nuevoEstado };
+  const ok = await guardarEnSegundoPlano(() => estado.espacio.guardarEstudiante(estudiante), "No se pudo actualizar el estado.");
+  if (!ok) return;
+  estado.estudiantes = ordenarLocal([...estado.estudiantes.filter((otro) => Number(otro.mat) !== Number(mat)), estudiante]);
+  estado.hoja = null;
+  render();
+  avisar(nuevoEstado === "retirada" ? "Marcada como retirada." : "Reactivada en la lista.");
+}
+
+async function importarListaDeArchivo(archivo) {
+  if (!archivo) return;
   try {
-    await repo.guardarEstudiante(estudiante);
-    estado.estudiantes = ordenarLocal([
-      ...estado.estudiantes.filter((otro) => Number(otro.mat) !== Number(mat)),
-      estudiante,
-    ]);
+    const contenido = JSON.parse(await archivo.text());
+    const lista = Array.isArray(contenido) ? contenido : contenido.estudiantes;
+    if (!Array.isArray(lista) || !lista.length) throw new Error("el archivo no trae estudiantes");
+    const normalizados = lista.map(normalizarEstudiante).filter(Boolean);
+    if (!normalizados.length) throw new Error("no se encontró ningún estudiante válido");
+    const ok = await confirmar({
+      titulo: "Importar lista base",
+      texto: `Se van a agregar o actualizar ${normalizados.length} estudiantes según su Mat. No. Los demás datos no se tocan.`,
+      boton: "Importar",
+    });
+    if (!ok) return;
+    await guardarEnSegundoPlano(() => estado.espacio.importarLista(normalizados));
+    estado.estudiantes = await estado.espacio.listarEstudiantes();
     render();
-    avisar(nuevoEstado === "retirada" ? "Estudiante marcada como retirada." : "Estudiante reactivada.");
-  } catch {
-    avisar("No se pudo actualizar la estudiante.", "error");
+    avisar(`Lista importada: ${normalizados.length} estudiantes.`);
+  } catch (error) {
+    avisar(`No se pudo importar la lista: ${error.message}.`, { tipo: "error" });
   }
 }
 
-app.addEventListener("click", async (evento) => {
+async function restaurarDeArchivo(archivo) {
+  if (!archivo) return;
+  try {
+    const contenido = JSON.parse(await archivo.text());
+    const estudiantes = contenido.estudiantes || [];
+    const dias = contenido.dias || [];
+    const registros = contenido.registros || [];
+    if (!estudiantes.length && !registros.length) throw new Error("el archivo no parece un respaldo");
+    const ok = await confirmar({
+      titulo: "Restaurar respaldo",
+      texto: `Se van a escribir ${plural(estudiantes.length, "estudiante", "estudiantes")}, ${plural(dias.length, "día", "días")} y ${plural(registros.length, "registro", "registros")} de asistencia. Lo que coincida se sobrescribe con la versión del respaldo.`,
+      boton: "Restaurar",
+      peligro: true,
+    });
+    if (!ok) return;
+    const exito = await guardarEnSegundoPlano(() => estado.espacio.importarTodo({ estudiantes, dias, registros }), "No se pudo restaurar el respaldo.");
+    if (!exito) return;
+    estado.cache.clear();
+    estado.estudiantes = await estado.espacio.listarEstudiantes();
+    render();
+    avisar("Respaldo restaurado.");
+  } catch (error) {
+    avisar(`No se pudo restaurar: ${error.message}.`, { tipo: "error" });
+  }
+}
+
+async function descargarRespaldo() {
+  try {
+    const datos = await estado.espacio.exportarTodo();
+    descargar(`respaldo_asistencia-${slugCurso(estado.curso)}_${D.hoyClave()}.json`, JSON.stringify(datos, null, 2), "application/json");
+    avisar("Respaldo descargado.");
+  } catch (error) {
+    console.error(error);
+    avisar("No se pudo descargar el respaldo.", { tipo: "error" });
+  }
+}
+
+// ——— Exportaciones ———
+
+let escudoCache = null;
+
+async function cargarEscudo() {
+  if (!escudoCache) {
+    escudoCache = (async () => {
+      const respuesta = await fetch(INSTITUCION.escudo);
+      if (!respuesta.ok) return null;
+      const blob = await respuesta.blob();
+      const datos = new Uint8Array(await blob.arrayBuffer());
+      const dataUrl = await new Promise((resolver) => {
+        const lector = new FileReader();
+        lector.onload = () => resolver(lector.result);
+        lector.onerror = () => resolver(null);
+        lector.readAsDataURL(blob);
+      });
+      const imagen = await new Promise((resolver, rechazar) => {
+        const elemento = new Image();
+        elemento.onload = () => resolver(elemento);
+        elemento.onerror = rechazar;
+        elemento.src = dataUrl;
+      });
+      return { datos, dataUrl, ancho: imagen.naturalWidth, alto: imagen.naturalHeight };
+    })().catch(() => null);
+  }
+  return escudoCache;
+}
+
+async function conGeneracion(tipo, tarea) {
+  if (estado.generando) return;
+  estado.generando = tipo;
+  render();
+  try {
+    await tarea();
+  } finally {
+    estado.generando = null;
+    render();
+  }
+}
+
+async function exportarPdf(mes, abrir = false) {
+  // La ventana se abre antes de generar para que el navegador no la bloquee.
+  const ventana = abrir ? window.open("", "_blank") : null;
+  await conGeneracion("pdf", async () => {
+    try {
+      await asegurarMes(mes);
+      const escudo = await cargarEscudo();
+      const blob = await crearInformePdf({
+        datos: datosMes(mes),
+        institucion: INSTITUCION,
+        curso: estado.curso,
+        logo: escudo?.dataUrl || null,
+        incluirObservaciones: estado.incluirObservaciones,
+      });
+      const nombre = nombreArchivo(estado.curso, mes, "pdf", "Informe_Asistencia");
+      if (ventana) {
+        ventana.location.href = URL.createObjectURL(blob);
+        return;
+      }
+      const resultado = await entregarArchivo(nombre, blob);
+      if (resultado === "descargado") avisar("Informe PDF descargado.");
+    } catch (error) {
+      console.error(error);
+      ventana?.close();
+      avisar("No se pudo generar el PDF. Intenta de nuevo.", { tipo: "error" });
+    }
+  });
+}
+
+async function exportarExcel(mes) {
+  await conGeneracion("excel", async () => {
+    try {
+      await asegurarMes(mes);
+      const escudo = await cargarEscudo();
+      const bytes = excelDelMes(datosMes(mes), {
+        institucion: INSTITUCION,
+        curso: estado.curso,
+        escudo: escudo ? { datos: escudo.datos, ancho: escudo.ancho, alto: escudo.alto } : null,
+      });
+      const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const resultado = await entregarArchivo(nombreArchivo(estado.curso, mes, "xlsx"), blob);
+      if (resultado === "descargado") avisar("Libro de Excel descargado.");
+    } catch (error) {
+      console.error(error);
+      avisar("No se pudo generar el Excel.", { tipo: "error" });
+    }
+  });
+}
+
+function exportarCsv(tipo, mes) {
+  const datos = mes ? datosMes(mes) : null;
+  if (tipo === "resumen") {
+    descargar(nombreArchivo(estado.curso, mes, "csv", "Asistencia_Resumen"), csvResumenDelMes(datos, estado.curso), "text/csv;charset=utf-8");
+  } else if (tipo === "detalle") {
+    descargar(nombreArchivo(estado.curso, mes, "csv", "Asistencia_Detalle"), csvDetalleDelMes(datos, estado.curso), "text/csv;charset=utf-8");
+  } else {
+    descargar(nombreArchivo(estado.curso, null, "csv", "Lista"), csvListaDelCurso(estado.estudiantes, estado.curso), "text/csv;charset=utf-8");
+  }
+  avisar("CSV descargado.");
+}
+
+// ——— Eventos ———
+
+async function alClic(evento) {
   const elemento = evento.target.closest("[data-accion]");
   if (!elemento || elemento.tagName === "FORM") return;
-  const accion = elemento.dataset.accion;
-  const fecha = elemento.dataset.fecha;
-  const mat = elemento.dataset.mat;
+  if (elemento.tagName === "TR" && evento.target.closest("a, button")) return;
+  const { accion, fecha, mat, mes } = elemento.dataset;
 
   switch (accion) {
     case "entrar-demo":
       await repo.entrar();
       break;
-    case "salir":
-      await repo.salir();
+    case "salir": {
+      const ok = estado.modo === "demo" || await confirmar({ titulo: "Cerrar sesión", texto: "Tendrás que volver a escribir el correo y la contraseña para entrar.", boton: "Cerrar sesión" });
+      if (ok) {
+        estado.hoja = null;
+        await repo.salir();
+        location.hash = "#/hoy";
+      }
       break;
-    case "navegar":
-      location.hash = elemento.dataset.destino;
-      break;
-    case "mes-anterior":
-      moverMes(-1);
-      break;
-    case "mes-siguiente":
-      moverMes(1);
-      break;
-    case "abrir-dia":
-      location.hash = `#/dia/${fecha}`;
-      break;
-    case "ir-hoy":
-      location.hash = `#/dia/${D.hoyClave()}`;
-      break;
-    case "volver":
-      location.hash = `#/mes/${estado.mesVista}`;
+    }
+    case "reintentar":
+      estado.cache.clear();
+      render();
       break;
     case "estado":
       await fijarEstado(fecha, Number(mat), elemento.dataset.estado);
@@ -1216,124 +1932,81 @@ app.addEventListener("click", async (evento) => {
     case "todos-presentes":
       await marcarTodosPresentes(fecha);
       break;
-    case "sin-clase":
-      await fijarTipoDia(fecha, "sinClase");
-      break;
-    case "volver-clase":
-      await fijarTipoDia(fecha, "clase");
-      break;
-    case "deshacer":
-      if (estado.deshacer) {
-        const deshacer = estado.deshacer;
-        estado.deshacer = null;
-        try {
-          await deshacer();
-        } catch {
-          avisar("No se pudo deshacer.", "error");
-        }
-      }
-      break;
-    case "nota-dia":
-      estado.notaAbierta = !estado.notaAbierta;
+    case "deshacer": {
+      const deshacer = estado.deshacer;
+      if (!deshacer) return;
+      estado.deshacer = null;
+      elemento.closest(".aviso")?.remove();
+      const ok = await guardarEnSegundoPlano(deshacer, "No se pudo deshacer.");
       render();
-      if (estado.notaAbierta) document.querySelector('[data-campo="nota-texto"]')?.focus();
+      if (ok) avisar("Cambio deshecho.");
       break;
-    case "guardar-nota-dia":
-      await guardarNotaDia(fecha);
-      break;
-    case "comentario": {
-      const matNumero = Number(mat);
-      if (estado.comentarioAbierto === matNumero) {
-        estado.comentarioAbierto = null;
-      } else {
-        estado.comentarioAbierto = matNumero;
-        const cache = estado.cache.get(fecha?.slice(0, 7)) || estado.cache.get(estado.diaVista?.slice(0, 7));
-        const registro = cache?.registros.get(D.claveRegistro(estado.diaVista, matNumero));
-        estado.etiquetasBorrador = registro?.etiquetas ? [...registro.etiquetas] : [];
-        estado.notaAbierta = false;
-      }
+    }
+    case "filtrar":
+      estado.filtro = estado.filtro === elemento.dataset.estado ? null : elemento.dataset.estado;
       render();
-      if (estado.comentarioAbierto === matNumero) {
-        document.querySelector(`textarea[data-comentario="${matNumero}"]`)?.focus();
-      }
+      break;
+    case "abrir-observacion": {
+      const registro = estado.cache.get(fecha.slice(0, 7))?.registros.get(D.claveRegistro(fecha, Number(mat)));
+      estado.etiquetasBorrador = [...(registro?.etiquetas || [])];
+      abrirHoja({ tipo: "observacion", fecha, mat: Number(mat) });
       break;
     }
     case "etiqueta": {
       const etiqueta = elemento.dataset.etiqueta;
-      if (estado.etiquetasBorrador.includes(etiqueta)) {
-        estado.etiquetasBorrador = estado.etiquetasBorrador.filter((otra) => otra !== etiqueta);
-        elemento.classList.remove("puesta");
-      } else {
-        estado.etiquetasBorrador.push(etiqueta);
-        elemento.classList.add("puesta");
-      }
+      const puesta = estado.etiquetasBorrador.includes(etiqueta);
+      estado.etiquetasBorrador = puesta ? estado.etiquetasBorrador.filter((otra) => otra !== etiqueta) : [...estado.etiquetasBorrador, etiqueta];
+      elemento.classList.toggle("puesta", !puesta);
+      elemento.setAttribute("aria-pressed", String(!puesta));
       break;
     }
-    case "guardar-comentario":
-      await guardarComentario(fecha, Number(mat));
-      break;
-    case "quitar-comentario": {
-      const cache = estado.cache.get(fecha.slice(0, 7));
-      const clave = D.claveRegistro(fecha, Number(mat));
-      const anterior = cache.registros.get(clave) || null;
-      const estadoActual = anterior?.estado || D.PRESENTE;
-      const esPredeterminado = estadoActual === D.PRESENTE;
-      if (esPredeterminado) cache.registros.delete(clave);
-      else cache.registros.set(clave, { fecha, mat: Number(mat), estado: estadoActual, comentario: "", etiquetas: [] });
-      estado.comentarioAbierto = null;
-      render();
-      try {
-        if (esPredeterminado) await repo.borrarRegistro(fecha, Number(mat));
-        else await repo.guardarRegistro({ fecha, mat: Number(mat), estado: estadoActual, comentario: "", etiquetas: [] });
-      } catch {
-        avisar("No se pudo quitar el comentario.", "error");
-      }
+    case "guardar-observacion": {
+      const comentario = (raiz.querySelector("[data-rol='comentario']")?.value || "").trim();
+      await guardarObservacion(fecha, Number(mat), comentario, [...estado.etiquetasBorrador]);
       break;
     }
-    case "csv-resumen":
-      await exportarResumenCsv();
+    case "quitar-observacion":
+      await guardarObservacion(fecha, Number(mat), "", []);
       break;
-    case "csv-matriz":
-      await exportarMatrizCsv();
+    case "abrir-nota-dia":
+      abrirHoja({ tipo: "nota-dia", fecha });
       break;
-    case "csv-lista":
-      exportarListaCsv();
+    case "guardar-nota-dia":
+      await guardarNotaDia(fecha, (raiz.querySelector("[data-rol='nota-dia']")?.value || "").trim());
       break;
-    case "excel-mes":
-      exportarExcelDelMes();
+    case "borrar-nota-dia":
+      await guardarNotaDia(fecha, "");
       break;
-    case "informe-pdf":
-      location.hash = `#/pdf/${estado.mesVista}`;
+    case "abrir-sin-clase":
+      abrirHoja({ tipo: "sin-clase", fecha });
       break;
-    case "volver-pdf":
-      location.hash = `#/resumen/${elemento.dataset.mes}`;
+    case "motivo": {
+      raiz.querySelectorAll("[data-accion='motivo']").forEach((chip) => {
+        const elegido = chip === elemento && !chip.classList.contains("puesta");
+        chip.classList.toggle("puesta", elegido);
+        chip.setAttribute("aria-pressed", String(elegido));
+      });
+      const libre = raiz.querySelector("[data-rol='motivo-libre']");
+      if (libre && elemento.classList.contains("puesta")) libre.value = "";
       break;
-    case "imprimir-pdf":
-      window.print();
+    }
+    case "confirmar-sin-clase": {
+      const elegido = raiz.querySelector("[data-accion='motivo'].puesta")?.dataset.motivo || "";
+      const libre = (raiz.querySelector("[data-rol='motivo-libre']")?.value || "").trim();
+      await marcarSinClase(fecha, libre || elegido);
       break;
-    case "descargar-pdf":
-      await descargarInformePdf(elemento);
+    }
+    case "volver-clase":
+      await volverAClase(fecha);
       break;
-    case "respaldo":
-      await descargarRespaldo();
+    case "ver-estudiante":
+      abrirHoja({ tipo: "estudiante", mat: Number(mat), mes: mes || estado.mes });
       break;
-    case "importar-lista":
-      document.querySelector('[data-rol="archivo-lista"]')?.click();
-      break;
-    case "restaurar-respaldo":
-      document.querySelector('[data-rol="archivo-respaldo"]')?.click();
-      break;
-    case "agregar-estudiante":
-      estado.formulario = { modo: "nuevo" };
-      render();
+    case "nuevo-estudiante":
+      abrirHoja({ tipo: "form-estudiante", mat: null });
       break;
     case "editar-estudiante":
-      estado.formulario = { modo: "editar", mat: Number(mat) };
-      render();
-      break;
-    case "cancelar-form":
-      estado.formulario = null;
-      render();
+      abrirHoja({ tipo: "form-estudiante", mat: Number(mat) });
       break;
     case "retirar":
       await cambiarEstadoEstudiante(mat, "retirada");
@@ -1341,66 +2014,160 @@ app.addEventListener("click", async (evento) => {
     case "reactivar":
       await cambiarEstadoEstudiante(mat, "activo");
       break;
-    case "reintentar":
+    case "abrir-cursos":
+      abrirHoja({ tipo: "cursos" });
+      break;
+    case "cambiar-curso": {
+      const curso = estado.cursos.find((otro) => otro.id === elemento.dataset.curso);
+      estado.hoja = null;
+      if (curso && curso.id !== estado.curso.id) {
+        estado.curso = curso;
+        guardarPreferencia("curso", curso.id);
+        await cargarCurso();
+        location.hash = "#/hoy";
+      }
       render();
       break;
+    }
+    case "cerrar-hoja":
+      if (estado.hoja?.resolver) estado.hoja.resolver(false);
+      cerrarHoja();
+      break;
+    case "aceptar-confirmacion": {
+      const resolver = estado.hoja?.resolver;
+      estado.hoja = null;
+      render();
+      resolver?.(true);
+      break;
+    }
+    case "ordenar":
+      estado.orden = elemento.dataset.orden;
+      render();
+      break;
+    case "pdf":
+      await exportarPdf(mes);
+      break;
+    case "pdf-abrir":
+      await exportarPdf(mes, true);
+      break;
+    case "excel":
+      await exportarExcel(mes);
+      break;
+    case "csv-resumen":
+      exportarCsv("resumen", mes);
+      break;
+    case "csv-detalle":
+      exportarCsv("detalle", mes);
+      break;
+    case "csv-lista":
+      exportarCsv("lista");
+      break;
+    case "respaldo":
+      await descargarRespaldo();
+      break;
+    case "importar-lista":
+      raiz.querySelector("[data-rol='archivo-lista']")?.click();
+      break;
+    case "restaurar":
+      raiz.querySelector("[data-rol='archivo-respaldo']")?.click();
+      break;
+    case "reiniciar-demo": {
+      const ok = await confirmar({ titulo: "Reiniciar la demo", texto: "Se borran los cambios hechos en la demo y vuelven los datos ficticios iniciales.", boton: "Reiniciar", peligro: true });
+      if (ok) {
+        repo.reiniciarDemo?.();
+        await cargarCurso();
+        render();
+        avisar("Demo reiniciada.");
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+document.addEventListener("click", (evento) => {
+  alClic(evento).catch((error) => {
+    console.error(error);
+    avisar("Algo salió mal. Intenta de nuevo.", { tipo: "error" });
+  });
+});
+
+document.addEventListener("keydown", (evento) => {
+  if (evento.key === "Escape" && estado.hoja) {
+    if (estado.hoja.resolver) estado.hoja.resolver(false);
+    cerrarHoja();
+    return;
+  }
+  const fila = evento.target.closest("tr[data-accion='ver-estudiante']");
+  if (fila && (evento.key === "Enter" || evento.key === " ")) {
+    evento.preventDefault();
+    fila.click();
+  }
+  if (evento.key === "Enter" && evento.target.dataset?.rol === "motivo-libre") {
+    evento.preventDefault();
+    raiz.querySelector("[data-accion='confirmar-sin-clase']")?.click();
   }
 });
 
-app.addEventListener("submit", async (evento) => {
+let temporizadorBusqueda = null;
+raiz.addEventListener("input", (evento) => {
+  if (evento.target.dataset.campo === "busqueda") {
+    estado.busqueda = evento.target.value;
+    clearTimeout(temporizadorBusqueda);
+    temporizadorBusqueda = setTimeout(render, 120);
+  }
+});
+
+raiz.addEventListener("change", async (evento) => {
+  const objetivo = evento.target;
+  if (objetivo.dataset.campo === "incluir-observaciones") {
+    estado.incluirObservaciones = objetivo.checked;
+    return;
+  }
+  if (objetivo.dataset.rol === "archivo-lista") {
+    await importarListaDeArchivo(objetivo.files?.[0]);
+    objetivo.value = "";
+  } else if (objetivo.dataset.rol === "archivo-respaldo") {
+    await restaurarDeArchivo(objetivo.files?.[0]);
+    objetivo.value = "";
+  }
+});
+
+raiz.addEventListener("submit", async (evento) => {
   const formulario = evento.target.closest("form");
   if (!formulario) return;
+  evento.preventDefault();
   if (formulario.dataset.accion === "entrar") {
-    evento.preventDefault();
     const correo = formulario.correo.value.trim();
     const clave = formulario.clave.value;
+    const error = document.getElementById("error-entrar");
     const boton = formulario.querySelector("button[type=submit]");
-    const errorEl = document.getElementById("error-entrar");
-    errorEl.textContent = "";
+    if (!correo || !clave) {
+      error.textContent = "Escribe el correo y la contraseña.";
+      return;
+    }
+    error.textContent = "";
     boton.disabled = true;
     boton.textContent = "Entrando…";
     try {
       await repo.entrar(correo, clave);
-    } catch (error) {
-      errorEl.textContent = error.message;
+    } catch (fallo) {
+      error.textContent = fallo.message;
       boton.disabled = false;
       boton.textContent = "Entrar";
     }
-    return;
-  }
-  if (formulario.dataset.accion === "form-estudiante") {
-    evento.preventDefault();
+  } else if (formulario.dataset.accion === "guardar-estudiante") {
     await guardarEstudianteDeFormulario(formulario);
   }
 });
 
-app.addEventListener("change", async (evento) => {
-  const objetivo = evento.target;
-  if (objetivo.dataset.rol === "archivo-lista") {
-    await importarListaDeArchivo(objetivo.files?.[0]);
-    objetivo.value = "";
-    return;
+window.addEventListener("hashchange", () => {
+  if (estado.hoja) {
+    estado.hoja.resolver?.(false);
+    estado.hoja = null;
   }
-  if (objetivo.dataset.rol === "archivo-respaldo") {
-    await restaurarDeArchivo(objetivo.files?.[0]);
-    objetivo.value = "";
-    return;
-  }
-  if (objetivo.dataset.campo === "motivo-dia") {
-    const fecha = estado.diaVista;
-    if (objetivo.value === "__otro") {
-      await guardarMotivoDia(fecha, "");
-      render();
-    } else {
-      await guardarMotivoDia(fecha, objetivo.value);
-    }
-    return;
-  }
-  if (objetivo.dataset.campo === "motivo-detalle") {
-    await guardarMotivoDia(estado.diaVista, objetivo.value.trim());
-  }
+  render();
 });
-
-window.addEventListener("hashchange", render);
 
 iniciar();

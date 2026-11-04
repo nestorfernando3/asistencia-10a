@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import * as A from "../v2/src/analisis.js";
-import { datosDelMes, libroDelMes, excelDelMes, csvResumenDelMes, nombreArchivo } from "../v2/src/exportes.js";
-import { CURSOS, INSTITUCION, cursosDe, rutasDeCurso } from "../v2/src/config.js";
-import { sembrarDemo } from "../v2/src/repositorio.js";
+import * as A from "../src/analisis.js";
+import { datosDelMes, libroDelMes, excelDelMes, csvResumenDelMes, nombreArchivo } from "../src/exportes.js";
+import { CURSOS, INSTITUCION, cursosDe, rutasDeCurso } from "../src/config.js";
+import { sembrarDemo } from "../src/repositorio.js";
 import { csvResumen, resumenDelMes } from "../src/dominio.js";
 
 const estudiantes = [
@@ -91,9 +91,9 @@ test("el libro de Excel trae cinco hojas con membrete, escudo y alertas", () => 
 
 test("el informe PDF se genera con las librerías locales", async () => {
   globalThis.window = globalThis;
-  vm.runInThisContext(readFileSync(new URL("../v2/vendor/jspdf.umd.min.js", import.meta.url), "utf8"));
-  vm.runInThisContext(readFileSync(new URL("../v2/vendor/jspdf.plugin.autotable.min.js", import.meta.url), "utf8"));
-  const { construirInformePdf } = await import("../v2/src/informe-pdf.js");
+  vm.runInThisContext(readFileSync(new URL("../vendor/jspdf.umd.min.js", import.meta.url), "utf8"));
+  vm.runInThisContext(readFileSync(new URL("../vendor/jspdf.plugin.autotable.min.js", import.meta.url), "utf8"));
+  const { construirInformePdf } = await import("../src/informe-pdf.js");
   const datos = datosDelMes({ estudiantes, dias, registros, ajustes: null, mes: "2026-10" });
   const doc = construirInformePdf(window.jspdf.jsPDF, { datos, institucion: INSTITUCION, curso: CURSOS[0], incluirObservaciones: true, hoy: "2026-11-03" });
   assert.equal(doc.getNumberOfPages(), 4);
