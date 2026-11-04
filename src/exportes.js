@@ -2,7 +2,7 @@
 // Todo es puro: recibe los datos y devuelve estructuras o bytes.
 
 import * as D from "./dominio.js";
-import { observacionesDelMes, diasSinClase, diaCorto, inicialDia } from "./analisis.js";
+import { observacionesDelMes, diasNoLectivos, diaCorto, inicialDia } from "./analisis.js";
 import { crearLibroXlsx, referencia } from "./libro-xlsx.js";
 
 export function datosDelMes({ estudiantes, dias, registros, ajustes, mes }) {
@@ -11,7 +11,7 @@ export function datosDelMes({ estudiantes, dias, registros, ajustes, mes }) {
   const porDia = D.estadisticasPorDia({ estudiantes, diasDeClase: resumen.diasDeClase, registros });
   const estadisticas = D.estadisticasDelMes({ estudiantes, resumen });
   const observaciones = observacionesDelMes({ estudiantes, registros, dias });
-  const sinClase = diasSinClase(dias);
+  const sinClase = diasNoLectivos(mes, new Map((dias || []).map((dia) => [dia.fecha, dia])));
   return { mes, estudiantes, resumen, matriz, porDia, estadisticas, observaciones, sinClase };
 }
 

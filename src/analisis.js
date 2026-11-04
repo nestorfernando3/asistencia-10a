@@ -2,6 +2,7 @@
 // alertas y CSV compartidos con la versión clásica) y no toca datos.
 
 import * as D from "./dominio.js";
+import { festivo } from "./festivos.js";
 
 const PARTICULAS = new Set(["de", "del", "la", "las", "los", "y", "da", "van", "von"]);
 const DIAS_CORTOS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
@@ -49,13 +50,14 @@ export function esFinDeSemanaFecha(fecha) {
 }
 
 // Días hábiles ya pasados (sin contar hoy) que aún no tienen pase ni marca de «sin clase».
+// Los festivos no cuentan como pendientes.
 export function diasPendientes(mes, dias, hoy) {
   const pendientes = [];
   const total = D.diasEnMes(mes);
   for (let dia = 1; dia <= total; dia++) {
     const fecha = D.claveDelDia(mes, dia);
     if (fecha >= hoy) break;
-    if (D.esFinDeSemana(mes, dia)) continue;
+    if (D.esFinDeSemana(mes, dia) || festivo(fecha)) continue;
     if (!dias.has(fecha)) pendientes.push(fecha);
   }
   return pendientes;
@@ -105,6 +107,26 @@ export function historialEstudiante({ mat, diasDeClase, registros }) {
 
 export function diasSinClase(dias) {
   return [...(dias || [])].filter((dia) => dia.tipo === "sinClase").sort((a, b) => a.fecha.localeCompare(b.fecha));
+}
+
+// Festivo que la app muestra para una fecha: entre semana y sin pase ni marca guardada.
+export function festivoPendiente(fecha, dias) {
+  if (dias.has(fecha) || esFinDeSemanaFecha(fecha)) return null;
+  return festivo(fecha);
+}
+
+// Días sin clase del mes: los marcados por el docente y los festivos entre semana
+// que no tienen pase. Los festivos se calculan; no se guardan en la base.
+export function diasNoLectivos(mes, dias) {
+  const marcados = diasSinClase([...dias.values()]).map((dia) => ({ ...dia, automatico: false }));
+  const festivos = [];
+  const total = D.diasEnMes(mes);
+  for (let numero = 1; numero <= total; numero++) {
+    const fecha = D.claveDelDia(mes, numero);
+    const nombre = festivoPendiente(fecha, dias);
+    if (nombre) festivos.push({ fecha, tipo: "sinClase", motivo: `Festivo: ${nombre}`, nota: "", automatico: true });
+  }
+  return [...marcados, ...festivos].sort((a, b) => a.fecha.localeCompare(b.fecha));
 }
 
 export function filtrarPorTexto(estudiantes, texto) {

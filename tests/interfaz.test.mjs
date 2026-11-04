@@ -105,3 +105,30 @@ test("el informe PDF se genera con las librerías locales", async () => {
   });
   assert.ok(vacio.getNumberOfPages() >= 3);
 });
+
+test("festivos de Colombia coinciden con el calendario oficial", async () => {
+  const { festivosDelAnio, festivo } = await import("../src/festivos.js");
+  assert.deepEqual([...festivosDelAnio(2026).keys()], [
+    "2026-01-01", "2026-01-12", "2026-03-23", "2026-04-02", "2026-04-03", "2026-05-01", "2026-05-18", "2026-06-08",
+    "2026-06-15", "2026-06-29", "2026-07-20", "2026-08-07", "2026-08-17", "2026-10-12", "2026-11-02", "2026-11-16",
+    "2026-12-08", "2026-12-25",
+  ]);
+  assert.equal(festivosDelAnio(2025).size, 17);
+  assert.equal(festivo("2025-06-30"), "San Pedro y San Pablo y Sagrado Corazón");
+  assert.equal(festivo("2027-03-26"), "Viernes Santo");
+  assert.equal(festivo("2026-11-03"), null);
+});
+
+test("los festivos no son pendientes y aparecen como días sin clase sin tocar los conteos", () => {
+  const diasNov = new Map([["2026-11-03", { fecha: "2026-11-03", tipo: "clase", nota: "" }]]);
+  assert.deepEqual(A.diasPendientes("2026-11", diasNov, "2026-11-06"), ["2026-11-04", "2026-11-05"]);
+  assert.equal(A.festivoPendiente("2026-11-02", diasNov), "Todos los Santos");
+  // Si se pasó lista en un festivo, cuenta como día de clase y deja de mostrarse como festivo.
+  assert.equal(A.festivoPendiente("2026-11-02", new Map([["2026-11-02", { fecha: "2026-11-02", tipo: "clase" }]])), null);
+  const datos = datosDelMes({ estudiantes, dias: [...diasNov.values()], registros: [], ajustes: null, mes: "2026-11" });
+  assert.deepEqual(datos.sinClase.map((dia) => [dia.fecha, dia.motivo]), [
+    ["2026-11-02", "Festivo: Todos los Santos"],
+    ["2026-11-16", "Festivo: Independencia de Cartagena"],
+  ]);
+  assert.equal(datos.resumen.totales.diasDeClase, 1);
+});

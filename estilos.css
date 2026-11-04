@@ -777,6 +777,7 @@ button:disabled {
 .pastilla-ambar { background: var(--t-suave); color: var(--t); }
 .pastilla-marca { background: var(--marca-suave); color: var(--marca); }
 .pastilla-gris { background: var(--superficie-3); color: var(--tinta-2); }
+.pastilla-sol { background: var(--sol-suave); color: var(--marca-fuerte); }
 
 .etiqueta-estado {
   display: inline-block;
@@ -1192,6 +1193,10 @@ button:disabled {
   background: repeating-linear-gradient(135deg, var(--tinta-3) 0 2px, transparent 2px 4px);
   border: 1px solid var(--tinta-3);
 }
+.punto-festivo {
+  background: var(--sol);
+}
+
 .punto-hoy {
   border: 2px solid var(--marca);
   background: transparent;
@@ -1316,6 +1321,22 @@ a.cal-dia:hover {
   place-items: center;
 }
 
+.cal-festivo {
+  background: var(--sol-suave);
+  border: 1px solid color-mix(in srgb, var(--sol) 55%, transparent);
+}
+
+.cal-festivo.cal-futuro {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.cal-festivo .cal-motivo {
+  color: var(--marca-fuerte);
+  hyphens: auto;
+  overflow-wrap: anywhere;
+}
+
 .cal-pendiente {
   background: var(--t-suave);
   border: 1px dashed color-mix(in srgb, var(--t) 50%, transparent);
@@ -1423,6 +1444,60 @@ a.cal-dia:hover {
 }
 
 /* ——— Pase del día ——— */
+
+.tarjeta-sin-clase,
+.tarjeta-festivo {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px 16px;
+  align-items: start;
+  padding: 20px;
+}
+
+.tarjeta-sin-clase h2,
+.tarjeta-festivo h2 {
+  font-family: var(--fuente-titulo);
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+
+.tarjeta-sin-clase p,
+.tarjeta-festivo p {
+  color: var(--tinta-2);
+}
+
+.tarjeta-sin-clase .nota-dia-texto {
+  margin-top: 10px;
+}
+
+.sin-clase-icono {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--superficie-3);
+  color: var(--tinta-2);
+}
+
+.tarjeta-festivo {
+  background: linear-gradient(150deg, var(--sol-suave), var(--superficie) 80%);
+  border-color: color-mix(in srgb, var(--sol) 50%, var(--linea));
+}
+
+.tarjeta-festivo .sin-clase-icono {
+  background: var(--sol);
+  color: #182235;
+}
+
+.sin-clase-acciones {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
 
 .tarjeta-resumen-dia {
   display: grid;
