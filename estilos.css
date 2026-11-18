@@ -296,10 +296,31 @@ button:disabled {
 .indicador-guardando { color: var(--tinta-3); }
 .indicador-guardando .icono { animation: latido 1s ease-in-out infinite; }
 .indicador-error { color: var(--a); }
+.indicador-pendiente { color: var(--t); }
 .indicador-demo { color: var(--marca); }
+
+button.indicador {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: none;
+  border: 0;
+  padding: 6px 4px;
+  margin: -6px -4px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 
 .barra-superior .indicador span {
   display: none;
+}
+
+/* En el celular el indicador normal es solo el ícono; sin conexión o con error
+   se muestra el texto, porque cambia lo que conviene hacer. */
+.barra-superior .indicador-error span,
+.barra-superior .indicador-pendiente span {
+  display: inline;
 }
 
 .banda-demo {

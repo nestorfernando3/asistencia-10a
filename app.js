@@ -3,7 +3,8 @@
 // navegación y documentos nuevos. Todo el estado de pantalla vive en `estado`
 // y cada cambio vuelve a pintar la vista con render().
 
-import { crearRepositorio } from "./src/repositorio.js";
+import { crearRepositorio, op } from "./src/repositorio.js";
+import { validarRespaldo } from "./src/respaldo.js";
 import * as D from "./src/dominio.js";
 import * as A from "./src/analisis.js";
 import { INSTITUCION, cursosDe, slugCurso } from "./src/config.js";
@@ -45,7 +46,9 @@ const estado = {
   orden: "no",
   deshacer: null,
   guardando: 0,
+  sincronizando: false,
   errorGuardado: false,
+  enLinea: navigator.onLine !== false,
   incluirObservaciones: false,
   generando: null,
 };
@@ -126,7 +129,7 @@ async function entregarArchivo(nombre, blob) {
 
 // ——— Avisos y estado de guardado ———
 
-function avisar(texto, { tipo = "ok", deshacer = false, duracion = 5000 } = {}) {
+function avisar(texto, { tipo = "ok", deshacer = false, duracion = 5000, accion = null } = {}) {
   zonaAvisos.querySelectorAll(".aviso").forEach((otro) => {
     if (deshacer || otro.dataset.deshacer) otro.remove();
   });
@@ -138,6 +141,7 @@ function avisar(texto, { tipo = "ok", deshacer = false, duracion = 5000 } = {}) 
     <span class="aviso-icono">${icono(tipo === "error" ? "alerta" : "check", { tamano: 18 })}</span>
     <span class="aviso-texto">${esc(texto)}</span>
     ${deshacer ? `<button type="button" class="aviso-accion" data-accion="deshacer">${icono("deshacer", { tamano: 16 })}Deshacer</button>` : ""}
+    ${accion ? `<button type="button" class="aviso-accion" data-accion="${esc(accion.id)}">${icono(accion.icono || "reiniciar", { tamano: 16 })}${esc(accion.etiqueta)}</button>` : ""}
   `;
   zonaAvisos.appendChild(aviso);
   requestAnimationFrame(() => aviso.classList.add("visible"));
@@ -158,31 +162,80 @@ function indicadorGuardado() {
   if (estado.modo === "demo") {
     return `<span class="indicador indicador-demo" data-rol="indicador" title="Los datos de la demo quedan solo en este navegador">${icono("info", { tamano: 15 })}<span>Demo</span></span>`;
   }
-  if (estado.guardando > 0) {
+  if (estado.errorGuardado) {
+    return `<button type="button" class="indicador indicador-error" data-rol="indicador" data-accion="recargar-datos" title="Un cambio no se pudo guardar. Toca para recargar los datos de la base.">${icono("nubeError", { tamano: 15 })}<span>Sin guardar · Recargar</span></button>`;
+  }
+  const pendiente = estado.guardando > 0 || estado.sincronizando;
+  if (!estado.enLinea) {
+    if (pendiente && repo?.persistente) {
+      return `<span class="indicador indicador-pendiente" data-rol="indicador" title="Sin conexión. Los cambios quedaron en este dispositivo y se enviarán solos al volver el internet, aunque cierres la app.">${icono("nubeError", { tamano: 15 })}<span>En el dispositivo</span></span>`;
+    }
+    if (pendiente) {
+      return `<span class="indicador indicador-error" data-rol="indicador" title="Sin conexión. No cierres la app hasta que vuelva el internet: este navegador no guarda los cambios en el dispositivo.">${icono("nubeError", { tamano: 15 })}<span>Sin conexión · no cierres</span></span>`;
+    }
+    return `<span class="indicador indicador-pendiente" data-rol="indicador" title="Sin conexión. Puedes seguir pasando lista: los cambios se enviarán al volver el internet.">${icono("nubeError", { tamano: 15 })}<span>Sin conexión</span></span>`;
+  }
+  if (pendiente) {
     return `<span class="indicador indicador-guardando" data-rol="indicador">${icono("nube", { tamano: 15 })}<span>Guardando…</span></span>`;
   }
-  if (estado.errorGuardado) {
-    return `<span class="indicador indicador-error" data-rol="indicador">${icono("nubeError", { tamano: 15 })}<span>Sin guardar</span></span>`;
-  }
-  return `<span class="indicador" data-rol="indicador">${icono("check", { tamano: 15 })}<span>Guardado</span></span>`;
+  return `<span class="indicador" data-rol="indicador" title="Todo está guardado en la base">${icono("check", { tamano: 15 })}<span>Guardado</span></span>`;
 }
 
+// Sin conexión, la promesa de Firestore no se resuelve hasta que el servidor confirma:
+// por eso la pantalla nunca espera este guardado (los cambios ya se pintaron) y solo
+// el indicador refleja si está pendiente. Un error aquí es un rechazo real (reglas,
+// datos inválidos): la pantalla puede mostrar algo que no está en la base y se ofrece
+// recargar.
 async function guardarEnSegundoPlano(tarea, mensajeError) {
   estado.guardando++;
   pintarIndicador();
   try {
     await tarea();
-    estado.errorGuardado = false;
     return true;
   } catch (error) {
     console.error(error);
     estado.errorGuardado = true;
-    avisar(mensajeError || "No se pudo guardar. Revisa la conexión.", { tipo: "error", duracion: 8000 });
+    const permiso = String(error?.code || "").includes("permission-denied");
+    avisar(permiso
+      ? "La base rechazó el cambio: esta cuenta no tiene permiso. Revisa las reglas de Firestore."
+      : (mensajeError || "No se pudo guardar el cambio."), {
+      tipo: "error",
+      duracion: 10000,
+      accion: { id: "recargar-datos", etiqueta: "Recargar" },
+    });
     return false;
   } finally {
     estado.guardando--;
     pintarIndicador();
   }
+}
+
+function guardar(operaciones, mensajeError) {
+  return guardarEnSegundoPlano(() => estado.espacio.aplicar(operaciones), mensajeError);
+}
+
+// Cambios que quedaron en el dispositivo de una sesión anterior sin conexión se
+// envían solos al abrir la app; mientras tanto el indicador dice «Guardando…».
+async function vigilarSincronizacion() {
+  if (estado.sincronizando || !repo || estado.modo === "demo") return;
+  estado.sincronizando = true;
+  pintarIndicador();
+  try {
+    await repo.esperarSincronizacion();
+  } catch (error) {
+    console.warn(error);
+  } finally {
+    estado.sincronizando = false;
+    pintarIndicador();
+  }
+}
+
+async function recargarDatos() {
+  estado.errorGuardado = false;
+  estado.deshacer = null;
+  await cargarCurso();
+  render();
+  avisar("Datos recargados desde la base.");
 }
 
 // ——— Arranque y datos ———
@@ -206,6 +259,7 @@ async function iniciar() {
       const preferido = leerPreferencias().curso;
       estado.curso = estado.cursos.find((curso) => curso.id === preferido) || estado.cursos[0] || null;
       await cargarCurso();
+      vigilarSincronizacion();
     } else {
       estado.cursos = [];
       estado.curso = null;
@@ -1524,14 +1578,25 @@ function prepararDia(cache, fecha) {
   return { diaAnterior, dia };
 }
 
-async function restaurarDia(cache, fecha, diaAnterior) {
+// Las funciones de deshacer actualizan el caché de pantalla al instante y devuelven
+// las operaciones para guardar en un solo lote.
+function restaurarDia(cache, fecha, diaAnterior) {
   if (diaAnterior) {
-    await estado.espacio.guardarDia(diaAnterior);
     cache.dias.set(fecha, diaAnterior);
-  } else {
-    await estado.espacio.borrarDia(fecha);
-    cache.dias.delete(fecha);
+    return op.dia(diaAnterior);
   }
+  cache.dias.delete(fecha);
+  return op.borrarDia(fecha);
+}
+
+function restaurarRegistro(cache, fecha, mat, anterior) {
+  const clave = D.claveRegistro(fecha, mat);
+  if (anterior) {
+    cache.registros.set(clave, anterior);
+    return op.registro(anterior);
+  }
+  cache.registros.delete(clave);
+  return op.borrarRegistro(fecha, mat);
 }
 
 async function fijarEstado(fecha, mat, nuevoEstado) {
@@ -1550,16 +1615,10 @@ async function fijarEstado(fecha, mat, nuevoEstado) {
   const predeterminado = registro.estado === D.PRESENTE && !registro.comentario && !registro.etiquetas.length;
   const { diaAnterior, dia } = prepararDia(cache, fecha);
 
-  estado.deshacer = async () => {
-    if (anterior) {
-      await estado.espacio.guardarRegistro(anterior);
-      cache.registros.set(clave, anterior);
-    } else {
-      await estado.espacio.borrarRegistro(fecha, mat);
-      cache.registros.delete(clave);
-    }
-    await restaurarDia(cache, fecha, diaAnterior);
-  };
+  estado.deshacer = () => [
+    restaurarRegistro(cache, fecha, mat, anterior),
+    restaurarDia(cache, fecha, diaAnterior),
+  ];
 
   if (predeterminado) cache.registros.delete(clave);
   else cache.registros.set(clave, registro);
@@ -1568,11 +1627,10 @@ async function fijarEstado(fecha, mat, nuevoEstado) {
   const estudiante = estado.estudiantes.find((otro) => Number(otro.mat) === Number(mat));
   avisar(`${A.nombreVisible(estudiante?.nombre || "")}: ${nuevoEstado.toLowerCase()}`, { deshacer: true, duracion: 4500 });
 
-  await guardarEnSegundoPlano(async () => {
-    if (predeterminado) await estado.espacio.borrarRegistro(fecha, mat);
-    else await estado.espacio.guardarRegistro(registro);
-    await estado.espacio.guardarDia(dia);
-  }, "No se pudo guardar el cambio. Revisa la conexión.");
+  await guardar([
+    predeterminado ? op.borrarRegistro(fecha, mat) : op.registro(registro),
+    op.dia(dia),
+  ], "No se pudo guardar el cambio.");
 }
 
 async function marcarTodosPresentes(fecha) {
@@ -1593,29 +1651,27 @@ async function marcarTodosPresentes(fecha) {
     }
   }
 
-  estado.deshacer = async () => {
+  estado.deshacer = () => {
+    const operaciones = [];
+    const restaurados = new Set(previos.map((registro) => String(registro.mat)));
     for (const registro of A.registrosDelDia(cache.registros, fecha)) {
-      await estado.espacio.borrarRegistro(fecha, registro.mat);
+      if (restaurados.has(String(registro.mat))) continue;
       cache.registros.delete(D.claveRegistro(fecha, registro.mat));
+      operaciones.push(op.borrarRegistro(fecha, registro.mat));
     }
-    for (const registro of previos) {
-      await estado.espacio.guardarRegistro(registro);
-      cache.registros.set(D.claveRegistro(fecha, registro.mat), registro);
-    }
-    await restaurarDia(cache, fecha, diaAnterior);
+    for (const registro of previos) operaciones.push(restaurarRegistro(cache, fecha, registro.mat, registro));
+    operaciones.push(restaurarDia(cache, fecha, diaAnterior));
+    return operaciones;
   };
 
   cache.dias.set(fecha, dia);
   estado.filtro = null;
   render();
   avisar("Día registrado: todos presentes.", { deshacer: true });
-  await guardarEnSegundoPlano(async () => {
-    for (const [operacion, registro] of cambios) {
-      if (operacion === "borrar") await estado.espacio.borrarRegistro(fecha, registro.mat);
-      else await estado.espacio.guardarRegistro(registro);
-    }
-    await estado.espacio.guardarDia(dia);
-  });
+  await guardar([
+    ...cambios.map(([operacion, registro]) => (operacion === "borrar" ? op.borrarRegistro(fecha, registro.mat) : op.registro(registro))),
+    op.dia(dia),
+  ], "No se pudo registrar el día.");
 }
 
 async function marcarSinClase(fecha, motivo) {
@@ -1625,23 +1681,20 @@ async function marcarSinClase(fecha, motivo) {
   const dia = { fecha, tipo: "sinClase", motivo, nota: diaAnterior?.nota || "" };
   const borrados = A.registrosDelDia(cache.registros, fecha);
 
-  estado.deshacer = async () => {
-    for (const registro of borrados) {
-      await estado.espacio.guardarRegistro(registro);
-      cache.registros.set(D.claveRegistro(fecha, registro.mat), registro);
-    }
-    await restaurarDia(cache, fecha, diaAnterior);
-  };
+  estado.deshacer = () => [
+    ...borrados.map((registro) => restaurarRegistro(cache, fecha, registro.mat, registro)),
+    restaurarDia(cache, fecha, diaAnterior),
+  ];
 
   for (const registro of borrados) cache.registros.delete(D.claveRegistro(fecha, registro.mat));
   cache.dias.set(fecha, dia);
   estado.hoja = null;
   render();
   avisar(`Día marcado sin clase${motivo ? `: ${motivo}` : ""}.`, { deshacer: true });
-  await guardarEnSegundoPlano(async () => {
-    for (const registro of borrados) await estado.espacio.borrarRegistro(fecha, registro.mat);
-    await estado.espacio.guardarDia(dia);
-  });
+  await guardar([
+    ...borrados.map((registro) => op.borrarRegistro(fecha, registro.mat)),
+    op.dia(dia),
+  ], "No se pudo marcar el día sin clase.");
 }
 
 async function volverAClase(fecha) {
@@ -1649,11 +1702,11 @@ async function volverAClase(fecha) {
   if (!cache) return;
   const diaAnterior = cache.dias.get(fecha) || null;
   const dia = { fecha, tipo: "clase", motivo: "", nota: diaAnterior?.nota || "" };
-  estado.deshacer = async () => restaurarDia(cache, fecha, diaAnterior);
+  estado.deshacer = () => [restaurarDia(cache, fecha, diaAnterior)];
   cache.dias.set(fecha, dia);
   render();
   avisar("Día de clase: todos quedan presentes.", { deshacer: true });
-  await guardarEnSegundoPlano(() => estado.espacio.guardarDia(dia));
+  await guardar([op.dia(dia)]);
 }
 
 async function guardarNotaDia(fecha, nota) {
@@ -1664,8 +1717,8 @@ async function guardarNotaDia(fecha, nota) {
   cache.dias.set(fecha, dia);
   estado.hoja = null;
   render();
-  const ok = await guardarEnSegundoPlano(() => estado.espacio.guardarDia(dia), "No se pudo guardar la nota.");
-  if (ok) avisar(nota ? "Nota del día guardada." : "Nota del día borrada.");
+  avisar(nota ? "Nota del día guardada." : "Nota del día borrada.");
+  await guardar([op.dia(dia)], "No se pudo guardar la nota.");
 }
 
 async function guardarObservacion(fecha, mat, comentario, etiquetas) {
@@ -1677,16 +1730,10 @@ async function guardarObservacion(fecha, mat, comentario, etiquetas) {
   const predeterminado = registro.estado === D.PRESENTE && !comentario && !etiquetas.length;
   const { diaAnterior, dia } = prepararDia(cache, fecha);
 
-  estado.deshacer = async () => {
-    if (anterior) {
-      await estado.espacio.guardarRegistro(anterior);
-      cache.registros.set(clave, anterior);
-    } else {
-      await estado.espacio.borrarRegistro(fecha, mat);
-      cache.registros.delete(clave);
-    }
-    await restaurarDia(cache, fecha, diaAnterior);
-  };
+  estado.deshacer = () => [
+    restaurarRegistro(cache, fecha, mat, anterior),
+    restaurarDia(cache, fecha, diaAnterior),
+  ];
 
   if (predeterminado) cache.registros.delete(clave);
   else cache.registros.set(clave, registro);
@@ -1694,11 +1741,10 @@ async function guardarObservacion(fecha, mat, comentario, etiquetas) {
   estado.hoja = null;
   render();
   avisar(predeterminado ? "Observación quitada." : "Observación guardada.", { deshacer: true });
-  await guardarEnSegundoPlano(async () => {
-    if (predeterminado) await estado.espacio.borrarRegistro(fecha, mat);
-    else await estado.espacio.guardarRegistro(registro);
-    await estado.espacio.guardarDia(dia);
-  }, "No se pudo guardar la observación.");
+  await guardar([
+    predeterminado ? op.borrarRegistro(fecha, mat) : op.registro(registro),
+    op.dia(dia),
+  ], "No se pudo guardar la observación.");
 }
 
 // ——— Estudiantes y datos ———
@@ -1746,15 +1792,11 @@ async function guardarEstudianteDeFormulario(formulario) {
     estado: existente?.estado || "activo",
     notaPersistente: nota || null,
   };
-  const boton = formulario.querySelector("button[type=submit]");
-  boton.disabled = true;
-  const ok = await guardarEnSegundoPlano(() => estado.espacio.guardarEstudiante(estudiante), "No se pudo guardar el estudiante.");
-  boton.disabled = false;
-  if (!ok) return;
   estado.estudiantes = ordenarLocal([...estado.estudiantes.filter((otro) => Number(otro.mat) !== mat), estudiante]);
   estado.hoja = null;
   render();
   avisar(edicion ? "Datos actualizados." : "Estudiante agregado.");
+  await guardar([op.estudiante(estudiante)], "No se pudo guardar el estudiante.");
 }
 
 async function cambiarEstadoEstudiante(mat, nuevoEstado) {
@@ -1770,16 +1812,23 @@ async function cambiarEstadoEstudiante(mat, nuevoEstado) {
     if (!ok) return;
   }
   const estudiante = { ...existente, estado: nuevoEstado };
-  const ok = await guardarEnSegundoPlano(() => estado.espacio.guardarEstudiante(estudiante), "No se pudo actualizar el estado.");
-  if (!ok) return;
   estado.estudiantes = ordenarLocal([...estado.estudiantes.filter((otro) => Number(otro.mat) !== Number(mat)), estudiante]);
   estado.hoja = null;
   render();
   avisar(nuevoEstado === "retirada" ? "Marcada como retirada." : "Reactivada en la lista.");
+  await guardar([op.estudiante(estudiante)], "No se pudo actualizar el estado.");
+}
+
+// Importar, restaurar y respaldar necesitan la base completa: sin conexión se piden
+// más tarde en vez de quedar a medias.
+function exigirConexion(tarea) {
+  if (estado.modo === "demo" || estado.enLinea) return true;
+  avisar(`Sin conexión: ${tarea} necesita internet. Intenta cuando vuelva la señal.`, { tipo: "error" });
+  return false;
 }
 
 async function importarListaDeArchivo(archivo) {
-  if (!archivo) return;
+  if (!archivo || !exigirConexion("importar la lista")) return;
   try {
     const contenido = JSON.parse(await archivo.text());
     const lista = Array.isArray(contenido) ? contenido : contenido.estudiantes;
@@ -1792,7 +1841,8 @@ async function importarListaDeArchivo(archivo) {
       boton: "Importar",
     });
     if (!ok) return;
-    await guardarEnSegundoPlano(() => estado.espacio.importarLista(normalizados));
+    const exito = await guardarEnSegundoPlano(() => estado.espacio.importarLista(normalizados), "No se pudo importar la lista.");
+    if (!exito) return;
     estado.estudiantes = await estado.espacio.listarEstudiantes();
     render();
     avisar(`Lista importada: ${normalizados.length} estudiantes.`);
@@ -1802,16 +1852,24 @@ async function importarListaDeArchivo(archivo) {
 }
 
 async function restaurarDeArchivo(archivo) {
-  if (!archivo) return;
+  if (!archivo || !exigirConexion("restaurar un respaldo")) return;
   try {
-    const contenido = JSON.parse(await archivo.text());
-    const estudiantes = contenido.estudiantes || [];
-    const dias = contenido.dias || [];
-    const registros = contenido.registros || [];
-    if (!estudiantes.length && !registros.length) throw new Error("el archivo no parece un respaldo");
+    let contenido;
+    try {
+      contenido = JSON.parse(await archivo.text());
+    } catch {
+      throw new Error("el archivo no es un JSON válido");
+    }
+    const { estudiantes, dias, registros, desde, hasta, exportado } = validarRespaldo(contenido, {
+      cursoDestino: estado.modo === "demo" ? "demo" : estado.curso.id,
+    });
+    const periodo = !desde ? ""
+      : desde === hasta ? ` Fecha: ${D.fechaCortaHumana(desde)}.`
+        : ` Fechas: del ${D.fechaCortaHumana(desde)} al ${D.fechaCortaHumana(hasta)}.`;
+    const hecho = exportado ? ` Respaldo del ${D.fechaCortaHumana(exportado.slice(0, 10))}.` : "";
     const ok = await confirmar({
       titulo: "Restaurar respaldo",
-      texto: `Se van a escribir ${plural(estudiantes.length, "estudiante", "estudiantes")}, ${plural(dias.length, "día", "días")} y ${plural(registros.length, "registro", "registros")} de asistencia. Lo que coincida se sobrescribe con la versión del respaldo.`,
+      texto: `Se van a escribir ${plural(estudiantes.length, "estudiante", "estudiantes")}, ${plural(dias.length, "día", "días")} y ${plural(registros.length, "registro", "registros")} de asistencia en el curso ${estado.curso.nombre}.${hecho}${periodo} Lo que coincida se sobrescribe con la versión del respaldo.`,
       boton: "Restaurar",
       peligro: true,
     });
@@ -1828,6 +1886,7 @@ async function restaurarDeArchivo(archivo) {
 }
 
 async function descargarRespaldo() {
+  if (!exigirConexion("el respaldo")) return;
   try {
     const datos = await estado.espacio.exportarTodo();
     descargar(`respaldo_asistencia-${slugCurso(estado.curso)}_${D.hoyClave()}.json`, JSON.stringify(datos, null, 2), "application/json");
@@ -1953,14 +2012,27 @@ async function alClic(evento) {
       await repo.entrar();
       break;
     case "salir": {
-      const ok = estado.modo === "demo" || await confirmar({ titulo: "Cerrar sesión", texto: "Tendrás que volver a escribir el correo y la contraseña para entrar.", boton: "Cerrar sesión" });
+      const pendientes = estado.modo !== "demo" && await repo.hayCambiosSinEnviar();
+      const ok = estado.modo === "demo" || await confirmar(pendientes
+        ? {
+          titulo: "Hay cambios sin enviar",
+          texto: "Algunos cambios todavía no llegan a la base (falta conexión). Si cierras sesión ahora se pierden. Espera a que el indicador diga «Guardado» antes de salir.",
+          boton: "Salir y perderlos",
+          peligro: true,
+        }
+        : { titulo: "Cerrar sesión", texto: "Tendrás que volver a escribir el correo y la contraseña para entrar. Los datos guardados en este dispositivo se borran.", boton: "Cerrar sesión" });
       if (ok) {
         estado.hoja = null;
-        await repo.salir();
+        const { recargar } = await repo.salir();
         location.hash = "#/hoy";
+        if (recargar) location.reload();
       }
       break;
     }
+    case "recargar-datos":
+      zonaAvisos.querySelectorAll(".aviso").forEach((aviso) => aviso.remove());
+      await recargarDatos();
+      break;
     case "reintentar":
       estado.cache.clear();
       render();
@@ -1976,9 +2048,10 @@ async function alClic(evento) {
       if (!deshacer) return;
       estado.deshacer = null;
       elemento.closest(".aviso")?.remove();
-      const ok = await guardarEnSegundoPlano(deshacer, "No se pudo deshacer.");
+      const operaciones = deshacer();
       render();
-      if (ok) avisar("Cambio deshecho.");
+      avisar("Cambio deshecho.");
+      await guardar(operaciones, "No se pudo deshacer.");
       break;
     }
     case "filtrar":
@@ -2200,6 +2273,28 @@ raiz.addEventListener("submit", async (evento) => {
     await guardarEstudianteDeFormulario(formulario);
   }
 });
+
+function cambioDeConexion() {
+  estado.enLinea = navigator.onLine !== false;
+  pintarIndicador();
+  if (estado.enLinea && estado.usuario) vigilarSincronizacion();
+}
+window.addEventListener("online", cambioDeConexion);
+window.addEventListener("offline", cambioDeConexion);
+
+// Solo hace falta avisar al cerrar si los cambios pendientes viven en memoria: con el
+// caché persistente quedan en el dispositivo y se envían en la próxima apertura.
+window.addEventListener("beforeunload", (evento) => {
+  if (estado.modo === "demo" || repo?.persistente !== false) return;
+  if (estado.guardando > 0) {
+    evento.preventDefault();
+    evento.returnValue = "";
+  }
+});
+
+if ("serviceWorker" in navigator && (location.protocol === "https:" || ["localhost", "127.0.0.1"].includes(location.hostname))) {
+  navigator.serviceWorker.register("sw.js").catch((error) => console.warn("Sin service worker", error));
+}
 
 window.addEventListener("hashchange", () => {
   if (estado.hoja) {

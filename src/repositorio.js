@@ -9,7 +9,7 @@ import { FIREBASE_CONFIG } from "./firebase-config.js";
 import { claveDeFecha, mesSiguiente, mesAnterior, claveRegistro } from "./dominio.js";
 import { diaNoLectivo } from "./festivos.js";
 
-const VERSION_FIREBASE = "11.0.2";
+export const VERSION_FIREBASE = "11.0.2";
 const urlSdk = (paquete) => `https://www.gstatic.com/firebasejs/${VERSION_FIREBASE}/${paquete}.js`;
 
 export function hayConfiguracion() {
@@ -47,15 +47,55 @@ function mensajeDeError(error) {
   return codigo ? `No se pudo entrar (Firebase: ${codigo}).` : "No se pudo entrar. Intenta de nuevo.";
 }
 
+// IndexedDB puede faltar o estar bloqueado (ventanas privadas, algunos navegadores
+// embebidos). En ese caso Firestore trabaja solo en memoria.
+function indexedDbDisponible() {
+  return new Promise((resolver) => {
+    try {
+      const prueba = indexedDB.open("asistencia-prueba-idb");
+      const limite = setTimeout(() => resolver(false), 1500);
+      prueba.onsuccess = () => {
+        clearTimeout(limite);
+        prueba.result.close();
+        resolver(true);
+      };
+      prueba.onerror = () => {
+        clearTimeout(limite);
+        resolver(false);
+      };
+    } catch {
+      resolver(false);
+    }
+  });
+}
+
+// Operaciones de escritura que se aplican juntas (todas o ninguna):
+//   { tipo: "registro" | "dia" | "estudiante", datos }                guardar
+//   { tipo: "registro" | "dia", borrar: true, datos: { fecha, mat } }  borrar
+export const op = {
+  registro: (registro) => ({ tipo: "registro", datos: registro }),
+  borrarRegistro: (fecha, mat) => ({ tipo: "registro", borrar: true, datos: { fecha, mat } }),
+  dia: (dia) => ({ tipo: "dia", datos: dia }),
+  borrarDia: (fecha) => ({ tipo: "dia", borrar: true, datos: { fecha } }),
+  estudiante: (estudiante) => ({ tipo: "estudiante", datos: estudiante }),
+};
+
 async function crearRepositorioFirebase(config) {
-  const [modApp, modAuth, modFs] = await Promise.all([
+  const [modApp, modAuth, modFs, persistente] = await Promise.all([
     import(urlSdk("firebase-app")),
     import(urlSdk("firebase-auth")),
     import(urlSdk("firebase-firestore")),
+    indexedDbDisponible(),
   ]);
   const app = modApp.initializeApp(config);
   const auth = modAuth.getAuth(app);
-  const db = modFs.getFirestore(app);
+  // Con caché persistente las marcas quedan en el dispositivo (IndexedDB) y se envían
+  // solas al volver la conexión, aunque la app se haya cerrado entretanto.
+  const db = persistente
+    ? modFs.initializeFirestore(app, {
+      localCache: modFs.persistentLocalCache({ tabManager: modFs.persistentMultipleTabManager() }),
+    })
+    : modFs.getFirestore(app);
 
   function delCurso(curso) {
     const { rutas } = curso;
@@ -64,6 +104,12 @@ async function crearRepositorioFirebase(config) {
     const refEstudiante = (mat) => documento("estudiantes", mat);
     const refDia = (fecha) => documento("dias", fecha);
     const refRegistro = (fecha, mat) => documento("asistencia", claveRegistro(fecha, mat));
+    const referencia = ({ tipo, datos }) => {
+      if (tipo === "registro") return refRegistro(datos.fecha, datos.mat);
+      if (tipo === "dia") return refDia(datos.fecha);
+      if (tipo === "estudiante") return refEstudiante(datos.mat);
+      throw new Error(`Operación desconocida: ${tipo}`);
+    };
     const rango = (nombre, inicio, fin) => modFs.getDocs(modFs.query(
       coleccion(nombre),
       modFs.where(modFs.documentId(), ">=", inicio),
@@ -105,11 +151,24 @@ async function crearRepositorioFirebase(config) {
       async borrarRegistro(fecha, mat) {
         await modFs.deleteDoc(refRegistro(fecha, mat));
       },
+      // Un solo lote: el registro y su día se guardan juntos o no se guardan.
+      // Sin conexión la promesa queda pendiente hasta que el servidor confirme; el
+      // cambio ya está en el caché local desde el primer momento.
+      async aplicar(operaciones) {
+        if (!operaciones.length) return;
+        const lote = modFs.writeBatch(db);
+        for (const operacion of operaciones) {
+          if (operacion.borrar) lote.delete(referencia(operacion));
+          else lote.set(referencia(operacion), limpiar(operacion.datos), { merge: true });
+        }
+        await lote.commit();
+      },
+      // Directo del servidor: un respaldo armado con el caché local podría salir incompleto.
       async exportarTodo() {
         const [estudiantes, dias, registros] = await Promise.all([
-          modFs.getDocs(coleccion("estudiantes")),
-          modFs.getDocs(coleccion("dias")),
-          modFs.getDocs(coleccion("asistencia")),
+          modFs.getDocsFromServer(coleccion("estudiantes")),
+          modFs.getDocsFromServer(coleccion("dias")),
+          modFs.getDocsFromServer(coleccion("asistencia")),
         ]);
         return {
           app: "asistencia-10a",
@@ -143,6 +202,17 @@ async function crearRepositorioFirebase(config) {
 
   return {
     modo: "firebase",
+    persistente,
+    // Se resuelve cuando el servidor confirmó todo lo pendiente (incluido lo que quedó
+    // en el dispositivo de una sesión anterior sin conexión).
+    esperarSincronizacion() {
+      return modFs.waitForPendingWrites(db);
+    },
+    async hayCambiosSinEnviar(espera = 1500) {
+      const confirmado = modFs.waitForPendingWrites(db).then(() => false, () => true);
+      const vencido = new Promise((resolver) => setTimeout(() => resolver(true), espera));
+      return Promise.race([confirmado, vencido]);
+    },
     observarSesion(observador) {
       return modAuth.onAuthStateChanged(auth, observador);
     },
@@ -153,8 +223,18 @@ async function crearRepositorioFirebase(config) {
         throw new Error(mensajeDeError(error));
       }
     },
+    // Al salir se borra el caché local para no dejar datos de estudiantes en el
+    // dispositivo. Firestore queda inutilizable después: la app debe recargarse.
     async salir() {
       await modAuth.signOut(auth);
+      if (!persistente) return { recargar: false };
+      try {
+        await modFs.terminate(db);
+        await modFs.clearIndexedDbPersistence(db);
+      } catch (error) {
+        console.warn("No se pudo borrar el caché local de Firestore", error);
+      }
+      return { recargar: true };
     },
     delCurso,
   };
@@ -321,6 +401,23 @@ function crearRepositorioDemo() {
       delete datos.registros[claveRegistro(fecha, mat)];
       persistir();
     },
+    async aplicar(operaciones) {
+      for (const { tipo, borrar, datos: valor } of operaciones) {
+        if (tipo === "registro") {
+          const clave = claveRegistro(valor.fecha, valor.mat);
+          if (borrar) delete datos.registros[clave];
+          else datos.registros[clave] = { ...datos.registros[clave], ...valor };
+        } else if (tipo === "dia") {
+          if (borrar) delete datos.dias[valor.fecha];
+          else datos.dias[valor.fecha] = { ...datos.dias[valor.fecha], ...valor };
+        } else if (tipo === "estudiante") {
+          upsertEstudiante({ ...datos.estudiantes.find((otro) => otro.mat === valor.mat), ...valor });
+        } else {
+          throw new Error(`Operación desconocida: ${tipo}`);
+        }
+      }
+      persistir();
+    },
     async exportarTodo() {
       return {
         app: "asistencia-10a",
@@ -355,6 +452,11 @@ function crearRepositorioDemo() {
 
   return {
     modo: "demo",
+    persistente: true,
+    async esperarSincronizacion() {},
+    async hayCambiosSinEnviar() {
+      return false;
+    },
     observarSesion(callback) {
       observador = callback;
       callback(sesion ? { email: "demo@local" } : null);
@@ -369,6 +471,7 @@ function crearRepositorioDemo() {
       sesion = false;
       fijarSesionDemo(false);
       observador?.(null);
+      return { recargar: false };
     },
     reiniciarDemo() {
       datos = sembrarDemo();

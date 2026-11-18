@@ -34,11 +34,12 @@ Sin conectar nada puedes probar la aplicación con datos ficticios: abre la app 
 
 1. Entra a https://console.firebase.google.com con la cuenta de Google → **Crear proyecto** → nombre `asistencia-10a` (desactiva Google Analytics).
 2. **Compilación → Authentication → Comenzar** → habilita **Correo electrónico/Contraseña**.
-3. En **Users → Agregar usuario**: el correo y una contraseña. Esa será la única cuenta.
-4. **Compilación → Firestore Database → Crear base de datos** → ubicación (p. ej. `us-east1`) → modo **producción**.
-5. Pestaña **Reglas**: pega el contenido de `firestore.rules` y **Publicar**.
-6. ⚙️ **Configuración del proyecto → Tus apps → Web (`</>`)** → registra la app `asistencia-10a-web` → copia el bloque `firebaseConfig` y pégalo en `src/firebase-config.js` (reemplaza `null` por el objeto).
-7. Recarga la app publicada e inicia sesión.
+3. En **Users → Agregar usuario**: el correo y una contraseña. Esa será la única cuenta. Copia su **UID de usuario** (columna de la tabla).
+4. En **Authentication → Configuración → Acciones del usuario**, desmarca **Habilitar creación (registro)** y **Habilitar eliminación**: así nadie puede abrirse una cuenta con la clave pública del proyecto.
+5. **Compilación → Firestore Database → Crear base de datos** → ubicación (p. ej. `us-east1`) → modo **producción**.
+6. Pestaña **Reglas**: pega el contenido de `firestore.rules`, reemplaza `PEGAR_AQUI_EL_UID_DEL_DOCENTE` por el UID del paso 3 y **Publicar**. Compruébalo en **Área de pruebas de reglas**: una lectura de `/estudiantes/1` autenticada con ese UID debe permitirse, y con cualquier otro UID, negarse.
+7. ⚙️ **Configuración del proyecto → Tus apps → Web (`</>`)** → registra la app `asistencia-10a-web` → copia el bloque `firebaseConfig` y pégalo en `src/firebase-config.js` (reemplaza `null` por el objeto).
+8. Recarga la app publicada e inicia sesión.
 
 ## Importar la lista base (una sola vez)
 
@@ -48,7 +49,12 @@ Para importarlo: abre la app **desde el computador** donde está el archivo → 
 
 ## Datos, respaldo y privacidad
 
-- Los datos viven en Firestore y solo son visibles con la sesión iniciada (regla `request.auth != null`).
+- Los datos viven en Firestore y solo los lee o escribe la cuenta del docente (regla por UID en `firestore.rules`). El registro de cuentas nuevas está desactivado en Firebase.
+- **Sin internet** la app abre igual (service worker) y se puede pasar lista: los cambios quedan guardados en el dispositivo y se envían solos al volver la conexión, aunque se cierre la app. El indicador dice *Guardado*, *Guardando…*, *Sin conexión* o *En el dispositivo*; si la base rechaza un cambio dice *Sin guardar · Recargar*.
+- Cada marca se guarda junto con su día en una sola escritura: o queda todo o no queda nada.
+- **Cerrar sesión** borra la copia local de los datos en ese dispositivo. Si hay cambios sin enviar, la app avisa antes.
+- Importar la lista, restaurar y descargar el respaldo piden conexión: el respaldo se arma siempre con los datos del servidor.
+- **Restaurar** revisa el archivo antes de escribir: rechaza respaldos de la demo, de otro curso o con datos inválidos, y muestra las fechas que trae.
 - El repositorio y la página **jamás** contienen nombres de estudiantes: solo el código.
 - **Descargar respaldo (JSON)** guarda todo el histórico; **Restaurar respaldo** lo vuelve a subir (también sirve para migrar de plataforma).
 - **Descargar Excel del mes** produce un `.xlsx` con cinco hojas: Lista, Resumen del mes, Detalle por día, Días del mes y Estadísticas.
@@ -67,7 +73,9 @@ src/analisis.js                   Lógica de pantalla (pendientes, observaciones
 src/exportes.js, libro-xlsx.js    Excel con formato y CSV de planillas
 src/informe-pdf.js                Informe PDF (jsPDF desde vendor/)
 src/dominio.js                    Lógica pura compartida (conteos, alertas, CSV) — con pruebas
+src/respaldo.js                   Validación de respaldos antes de restaurar
 src/firebase-config.js            Configuración web de Firebase (claves públicas)
+sw.js                             Service worker: la app abre sin internet
 vendor/                           jsPDF y jspdf-autotable (copias verificadas con SRI)
 clasica/                          Interfaz anterior (usa src/datos.js, src/pdf.js, src/xlsx.js, src/estilos.css)
 v2/                               Redirección de la dirección antigua a la principal
@@ -88,3 +96,5 @@ python3 -m http.server 8000                  # servidor local → http://localho
 ## Publicación
 
 GitHub Pages desde la rama `main` (raíz del repositorio). Cualquier cambio se publica solo con hacer commit y push.
+
+El service worker busca siempre primero la versión publicada, así que los cambios de código llegan sin hacer nada más. Si se agrega un módulo nuevo a `src/` o cambia la versión de Firebase, hay que sumarlo a la lista de `sw.js` y subir su `VERSION` (una prueba avisa si falta un módulo).
